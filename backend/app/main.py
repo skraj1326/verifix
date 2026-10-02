@@ -21,6 +21,7 @@ from app.api.v1 import (
     ai_agents,
     spec_analysis,
     rtl_hierarchy,
+    coverage_dashboard,
 )
 
 logging.basicConfig(
@@ -77,6 +78,7 @@ app.include_router(rtl_hierarchy.router, prefix=API_PREFIX, tags=["RTL Hierarchy
 app.include_router(verification.router, prefix=API_PREFIX, tags=["Verification"])
 app.include_router(simulation.router, prefix=API_PREFIX, tags=["Simulation"])
 app.include_router(coverage.router, prefix=API_PREFIX, tags=["Coverage"])
+app.include_router(coverage_dashboard.router, prefix=API_PREFIX, tags=["Coverage Dashboard"])
 app.include_router(analysis.router, prefix=API_PREFIX, tags=["Analysis"])
 app.include_router(ai_agents.router, prefix=API_PREFIX, tags=["AI Agents"])
 app.include_router(spec_analysis.router, prefix=API_PREFIX, tags=["Specification"])
@@ -142,10 +144,12 @@ async def root():
                 "docs": "/docs",
                 "projects": f"{API_PREFIX}/projects",
                 "rtl_analysis": f"{API_PREFIX}/rtl/analyze",
+                "rtl_hierarchy": f"{API_PREFIX}/rtl/hierarchy",
                 "verification_plan": f"{API_PREFIX}/verification/plan",
                 "assertions": f"{API_PREFIX}/verification/assertions",
                 "tests": f"{API_PREFIX}/verification/tests",
                 "coverage": f"{API_PREFIX}/coverage/analyze",
+                "coverage_dashboard": f"{API_PREFIX}/coverage/dashboard",
                 "failure_analysis": f"{API_PREFIX}/failure-analysis",
                 "spec_analysis": f"{API_PREFIX}/spec/analyze",
                 "websocket": "/ws",

@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
-import { ChevronRight, ChevronDown, FileCode, GitBranch, Eye, Search, Expand } from "lucide-react";
+import { ChevronRight, ChevronDown, FileCode, GitBranch, Eye, Search, Expand, TrendingUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface ModuleNode {

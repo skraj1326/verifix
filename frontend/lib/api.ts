@@ -203,6 +203,27 @@ class ApiClient {
   async generateDiagram(designId: string, format: string = "mermaid") {
     return this.post("/rtl/diagram", { design_id: designId, format });
   }
+
+  // Coverage Dashboard
+  async getCoverageDashboard(projectId: string) {
+    return this.get(`/coverage/dashboard/${projectId}`);
+  }
+
+  async getCoverageDrilldown(projectId: string, moduleName: string, covergroup?: string) {
+    return this.get(`/coverage/drilldown/${projectId}/${moduleName}`, { params: { covergroup } });
+  }
+
+  async getBinDetails(projectId: string, moduleName: string, covergroupName: string, coverpointName: string) {
+    return this.get(`/coverage/bins/${projectId}/${moduleName}/${covergroupName}/${coverpointName}`);
+  }
+
+  async getCoverageTrends(projectId: string, days: number = 30) {
+    return this.get(`/coverage/trends/${projectId}`, { params: { days } });
+  }
+
+  async compareCoverage(projectId: string, simId1: string, simId2: string) {
+    return this.post("/coverage/compare", { project_id: projectId, sim_id_1: simId1, sim_id_2: simId2 });
+  }
 }
 
 export const api = new ApiClient();
