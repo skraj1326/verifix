@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { Suspense, useState, useEffect } from "react";
 import {
   FileText,
   ChevronLeft,
@@ -42,7 +42,28 @@ interface Report {
   metadata: Record<string, any>;
 }
 
+// useSearchParams() opts a route out of static prerendering unless it is read
+// inside a Suspense boundary, so the page wraps its content below.
 export default function ReportsPage() {
+  return (
+    <Suspense fallback={<PageFallback label="Loading reports" />}>
+      <ReportsContent />
+    </Suspense>
+  );
+}
+
+function PageFallback({ label }: { label: string }) {
+  return (
+    <div className="min-h-screen bg-background flex items-center justify-center">
+      <div className="text-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto" />
+        <p className="mt-3 text-sm text-muted-foreground">{label}...</p>
+      </div>
+    </div>
+  );
+}
+
+function ReportsContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const projectId = searchParams.get("projectId");
@@ -122,11 +143,33 @@ export default function ReportsPage() {
 
   const handleExport = async (exportFormat: "html" | "pdf" | "json") => {
     if (!report) return;
+    if (exportFormat === "pdf") {
+      toast.error("PDF export is not implemented yet. Use HTML or JSON.");
+      return;
+    }
     try {
-      await api.exportReport(report.id, exportFormat);
-      toast.success(`Report exported as ${exportFormat.toUpperCase()}`);
-    } catch (err) {
-      toast.error("Export failed");
+      const res = await api.exportReport(report.project_id, {
+        format: exportFormat,
+        simulation_id: report.metadata?.simulation_id ?? undefined,
+        include_sections: includeSections.length ? includeSections : undefined,
+        template,
+      });
+
+      const blob = new Blob([res.data], {
+        type: exportFormat === "json" ? "application/json" : "text/html",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${report.id}.${exportFormat}`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+
+      toast.success(`Report downloaded as ${exportFormat.toUpperCase()}`);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Export failed");
     }
   };
 
@@ -292,8 +335,8 @@ export default function ReportsPage() {
                     <input
                       type="checkbox"
                       checked={includeSections.includes(section.id)}
-                      onChange={e => handleSectionToggle(section.id)}
-                      className="w-4 h-4 text-purple-600 border-gray-600 rounded focus:ring-purple-500"
+                      readOnly
+                      className="w-4 h-4 text-purple-600 border-gray-600 rounded focus:ring-purple-500 pointer-events-none"
                     />
                     <div className="flex-1 min-w-0">
                       <span className="text-sm font-medium text-white truncate block">{section.label}</span>
@@ -355,7 +398,7 @@ export default function ReportsPage() {
                     JSON
                   </button>
                   <button
-                    onClick={() => window.open(`/reports/${report.id}`, "_blank")}
+                    onClick={() => handleExport("html")}
                     className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg flex items-center gap-2"
                   >
                     <Eye className="w-4 h-4" />
@@ -383,5 +426,3 @@ export default function ReportsPage() {
     </div>
   );
 }
-
-export default ReportsPage;

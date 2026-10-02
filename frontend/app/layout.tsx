@@ -1,9 +1,12 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "react-hot-toast";
 
-const inter = Inter({ subsets: ["latin"] });
+// `next/font/google` downloads the font at build time and its ESM font loader
+// crashes on Windows with Node 24 (ERR_UNSUPPORTED_ESM_URL_SCHEME: protocol
+// 'c:'). Using a local system font stack keeps the build hermetic and avoids
+// the incompatible loader.
+const fontClassName = "font-sans";
 
 export const metadata: Metadata = {
   title: "VerifiX AI - Verification Platform",
@@ -17,7 +20,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={`${inter.className} bg-gray-950 text-white antialiased`}>
+      <body className={`${fontClassName} bg-gray-950 text-white antialiased`}>
         {children}
         <Toaster
           position="top-right"

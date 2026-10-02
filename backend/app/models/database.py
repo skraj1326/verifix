@@ -106,7 +106,7 @@ class DesignModule(Base):
     assertions = Column(JSONB, default=list)
     functions = Column(JSONB, default=list)
     tasks = Column(JSONB, default=list)
-    metadata = Column(JSONB, default=dict)
+    extra_metadata = Column("metadata", JSONB, default=dict)
 
     design = relationship("Design", back_populates="modules")
     __table_args__ = (
@@ -224,7 +224,7 @@ class Simulation(Base):
     waveform_path = Column(String(1024))
     compilation_log = Column(Text)
     simulation_log = Column(Text)
-    metadata = Column(JSONB, default=dict)
+    extra_metadata = Column("metadata", JSONB, default=dict)
 
     project = relationship("Project", back_populates="simulations")
     results = relationship("SimulationResult", back_populates="simulation", cascade="all, delete-orphan")

@@ -1,14 +1,19 @@
 "use client";
 
 import React, { useRef, useEffect, useState } from "react";
-import Editor from "@monaco-editor/react";
-import * as monaco from "monaco-editor";
+import Editor, { type Monaco } from "@monaco-editor/react";
+// Type-only import: erased at compile time, so webpack never bundles
+// monaco-editor's ESM entry (its CSS imports break the Next 14 build on
+// Windows). The runtime namespace comes from @monaco-editor/react's loader.
+import type * as monaco from "monaco-editor";
 import { cn } from "@/lib/utils";
 
-// Register SystemVerilog language
-if (typeof window !== "undefined") {
-  monaco.languages.register({ id: "systemverilog" });
-  monaco.languages.setMonarchTokensProvider("systemverilog", {
+// Register SystemVerilog language. Must run inside `beforeMount` so it executes
+// in the browser once @monaco-editor/react has loaded Monaco.
+function registerSystemVerilogLanguage(monacoInstance: Monaco) {
+  {
+    monacoInstance.languages.register({ id: "systemverilog" });
+    monacoInstance.languages.setMonarchTokensProvider("systemverilog", {
     keywords: [
       "module", "endmodule", "interface", "endinterface", "package", "endpackage",
       "program", "endprogram", "class", "endclass", "function", "endfunction",
@@ -70,7 +75,7 @@ if (typeof window !== "undefined") {
   });
 
   // Define SystemVerilog language configuration
-  monaco.languages.setLanguageConfiguration("systemverilog", {
+  monacoInstance.languages.setLanguageConfiguration("systemverilog", {
     comments: {
       lineComment: "//",
       blockComment: ["/*", "*/"],
@@ -115,6 +120,7 @@ if (typeof window !== "undefined") {
       },
     },
   });
+  }
 }
 
 interface MonacoEditorProps {
@@ -213,13 +219,12 @@ export function MonacoEditor({
       },
       renderWhitespace: "selection",
       renderControlCharacters: true,
-      renderIndentGuides: true,
-      highlightActiveIndentGuide: true,
     });
   };
 
-  const handleEditorWillMount = (monacoInstance: typeof monaco) => {
+  const handleEditorWillMount = (monacoInstance: Monaco) => {
     // Register custom language features
+    registerSystemVerilogLanguage(monacoInstance);
     monacoInstance.languages.registerCompletionItemProvider("systemverilog", {
       provideCompletionItems: (model, position) => {
         const textUntilPosition = model.getValueInRange({
@@ -229,7 +234,17 @@ export function MonacoEditor({
           endColumn: position.column,
         });
 
-        const suggestions = [
+        // Monaco requires a `range` on every CompletionItem. Reuse the word range
+        // under the cursor so inserted snippets replace the partial token.
+        const word = model.getWordUntilPosition(position);
+        const range: monaco.IRange = {
+          startLineNumber: position.lineNumber,
+          endLineNumber: position.lineNumber,
+          startColumn: word.startColumn,
+          endColumn: word.endColumn,
+        };
+
+        const suggestions: Omit<monaco.languages.CompletionItem, "range">[] = [
           {
             label: "module",
             kind: monacoInstance.languages.CompletionItemKind.Snippet,
@@ -281,7 +296,7 @@ export function MonacoEditor({
           },
         ];
 
-        return { suggestions };
+        return { suggestions: suggestions.map((s) => ({ ...s, range })) };
       },
     });
 
@@ -356,7 +371,7 @@ export function MonacoEditor({
       value={value}
       onChange={(val) => val && onChange(val)}
       onMount={handleEditorDidMount}
-      onBeforeMount={handleEditorWillMount}
+      beforeMount={handleEditorWillMount}
       options={{
         minimap: { enabled: minimap },
         lineNumbers,
@@ -392,8 +407,6 @@ export function MonacoEditor({
         },
         renderWhitespace: "selection",
         renderControlCharacters: true,
-        renderIndentGuides: true,
-        highlightActiveIndentGuide: true,
       }}
       className={cn("border border-gray-700 rounded-lg bg-gray-950", className)}
     />

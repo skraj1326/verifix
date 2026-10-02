@@ -1,5 +1,8 @@
+"use client";
+
 import React, { useState, useEffect } from "react";
 import { MonacoEditor } from "@/components/editor/MonacoEditor";
+import { RTLHierarchyBrowser } from "@/components/diagram/RTLHierarchyBrowser";
 import { FileText, Play, Download, Upload, Search, ChevronDown, Save, Loader2, GitBranch, Code2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -144,6 +147,7 @@ export default function RTLEditorPage() {
   const [analysisResult, setAnalysisResult] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<"editor" | "analysis" | "hierarchy" | "files">("editor");
   const [designId, setDesignId] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState<string>("");
   const [files, setFiles] = useState<{name: string, content: string}[]>([
     { name: "fifo_sync.sv", content: FIFO_EXAMPLE },
   ]);
@@ -159,15 +163,17 @@ export default function RTLEditorPage() {
       const response = await api.post("/rtl/analyze", {
         content: rtlContent,
         filename,
+        ...(projectId ? { project_id: projectId } : {}),
       });
       setAnalysisResult(response.data);
-      // Extract design ID from the first module if available
-      if (response.data.modules && response.data.modules.length > 0) {
-        // Use a generated design ID based on filename and timestamp
-        setDesignId(`design_${Date.now()}`);
-      }
+      // Only a persisted design has a real id that hierarchy/diagram endpoints accept.
+      setDesignId(response.data.design_id ?? null);
       setActiveTab("analysis");
-      toast.success("RTL analysis complete");
+      if (response.data.persisted) {
+        toast.success(`RTL analysis complete - saved as design ${response.data.design_id}`);
+      } else {
+        toast.success("RTL analysis complete. Add a project id to enable the hierarchy view.");
+      }
     } catch (error: any) {
       toast.error(error.response?.data?.detail || "Analysis failed");
     } finally {
@@ -188,22 +194,25 @@ export default function RTLEditorPage() {
         name: filename.replace(".sv", "").replace("_", " ").toUpperCase(),
         description: `Auto-generated from ${filename}`,
       });
-      const projectId = projectRes.data.id;
+      const createdProjectId = projectRes.data.id;
+      setProjectId(createdProjectId);
 
-      // Upload RTL
-      await api.post(`/projects/${projectId}/rtl`, {
+      // Persist the RTL against the project so the design id is real.
+      const analyzeRes = await api.post("/rtl/analyze", {
         content: rtlContent,
         filename,
+        project_id: createdProjectId,
       });
+      setDesignId(analyzeRes.data.design_id ?? null);
 
       // Run full verification flow
-      const flowRes = await api.post("/verification/full-flow", {
+      await api.post("/verification/full-flow", {
         rtl_content: rtlContent,
         specification: `Parameterized synchronous FIFO with full/empty flags, occupancy counter, and built-in assertions.`,
       });
 
       toast.success("Full verification flow complete!");
-      router.push(`/projects/${projectId}`);
+      router.push(`/projects/${createdProjectId}`);
     } catch (error: any) {
       toast.error(error.response?.data?.detail || "Full flow failed");
     } finally {
@@ -272,6 +281,16 @@ export default function RTLEditorPage() {
             value={filename}
             onChange={(e) => setFilename(e.target.value)}
             className="bg-transparent border-none outline-none text-white font-mono text-sm w-40"
+          />
+          <span className="text-gray-600">|</span>
+          <span className="text-gray-500 text-xs">Project</span>
+          <input
+            type="text"
+            value={projectId}
+            onChange={(e) => setProjectId(e.target.value.trim())}
+            placeholder="(optional) id"
+            title="Optional. Provide an existing project id to persist this design and enable the Hierarchy tab."
+            className="bg-transparent border border-gray-700 rounded px-2 py-0.5 text-gray-300 font-mono text-xs w-44 outline-none focus:border-blue-500"
           />
         </div>
         <div className="flex items-center gap-2">
@@ -449,13 +468,20 @@ export default function RTLEditorPage() {
 
         {activeTab === "hierarchy" && (
           <div className="h-full p-4">
-            <div className="h-full">
-              <iframe
-                src={`/rtl/hierarchy?designId=${designId}`}
-                className="w-full h-full border-0"
-                title="RTL Hierarchy Browser"
-              />
-            </div>
+            {designId ? (
+              <div className="h-full">
+                <RTLHierarchyBrowser projectId={projectId} designId={designId} />
+              </div>
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center gap-3 text-center">
+                <GitBranch className="w-10 h-10 text-gray-600" />
+                <p className="text-gray-400">No persisted design available</p>
+                <p className="text-sm text-gray-500 max-w-md">
+                  The hierarchy view needs a saved design. Enter a project id in the toolbar and
+                  run Analyze again to persist the RTL.
+                </p>
+              </div>
+            )}
           </div>
         )}
 

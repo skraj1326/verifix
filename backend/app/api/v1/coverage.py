@@ -15,6 +15,18 @@ class CoverageAnalysisRequest(BaseModel):
     coverage_report: str
     rtl_content: Optional[str] = ""
     module_name: Optional[str] = ""
+    # Optional persistence target. When both are supplied, the analysis is
+    # stored so the dashboard/trends endpoints can serve real evidence.
+    project_id: Optional[str] = None
+    simulation_id: Optional[str] = None
+
+
+class PersistedCoverageResult(BaseModel):
+    simulation_id: str
+    reports_created: int
+    gaps_created: int
+    evidence: str = "FACT"
+    note: str = "Coverage results persisted from the supplied simulator report."
 
 
 class CoverageGapRequest(BaseModel):
@@ -50,7 +62,7 @@ async def analyze_coverage(request: CoverageAnalysisRequest):
     # Generate report
     report = analyzer.generate_coverage_report(coverage, gaps, request.module_name)
 
-    return {
+    response = {
         "report": report,
         "coverage": {
             ct: {"overall": d.overall, "covered": d.covered, "total": d.total}
@@ -58,6 +70,93 @@ async def analyze_coverage(request: CoverageAnalysisRequest):
         },
         "gaps": gaps,
     }
+
+    # Persist real evidence when a simulation is identified.
+    if request.project_id and request.simulation_id:
+        persisted = await _persist_coverage_results(
+            request.project_id, request.simulation_id, coverage, gaps, request.module_name
+        )
+        response["persisted"] = persisted.model_dump()
+
+    return response
+
+
+async def _persist_coverage_results(project_id, simulation_id, coverage: dict, gaps: list, module_name: str = ""):
+    """Store analyzed coverage results as database rows.
+
+    Only real analyzer output is written. Nothing is synthesized here.
+    """
+    from app.core.database import AsyncSessionLocal
+    from app.models.database import CoverageGap, CoverageReport, Simulation
+    from app.models.database import SeverityLevel
+    from sqlalchemy import select
+
+    created_reports = 0
+    created_gaps = 0
+
+    async with AsyncSessionLocal() as db:
+        sim = await db.execute(
+            select(Simulation).where(Simulation.id == simulation_id)
+        )
+        sim_row = sim.scalar_one_or_none()
+        if not sim_row:
+            raise HTTPException(
+                status_code=404, detail="Simulation not found; coverage was analyzed but not persisted"
+            )
+
+        saved_reports: list = []
+        for cov_type, data in coverage.items():
+            # Skip empty coverage types - storing zeros would fabricate evidence.
+            if not data.total:
+                continue
+            row = CoverageReport(
+                simulation_id=sim_row.id,
+                report_type=cov_type,
+                overall_coverage=float(data.overall),
+                details={
+                    "covered": int(data.covered),
+                    "total": int(data.total),
+                    "module": module_name,
+                },
+                gaps=[g for g in gaps if g.get("coverage_type") == cov_type],
+            )
+            saved_reports.append(row)
+            db.add(row)
+            created_reports += 1
+
+        await db.flush()
+
+        # CoverageGap.report_id is non-nullable, so gaps are only stored when at
+        # least one real coverage report was persisted for this simulation.
+        if saved_reports:
+            for gap in gaps:
+                impact = gap.get("estimated_impact") or 0.0
+                if impact >= 70:
+                    severity = SeverityLevel.ERROR
+                elif impact >= 30:
+                    severity = SeverityLevel.WARNING
+                else:
+                    severity = SeverityLevel.INFO
+                db.add(
+                    CoverageGap(
+                        report_id=saved_reports[0].id,
+                        gap_type=gap.get("gap_type", "unknown"),
+                        description=gap.get("description", ""),
+                        rtl_location=gap.get("rtl_location", {}),
+                        conditions=gap.get("conditions", []),
+                        suggested_test=gap.get("suggested_test", ""),
+                        severity=severity,
+                    )
+                )
+                created_gaps += 1
+
+        await db.commit()
+
+    return PersistedCoverageResult(
+        simulation_id=str(simulation_id),
+        reports_created=created_reports,
+        gaps_created=created_gaps,
+    )
 
 
 @router.post("/gaps")

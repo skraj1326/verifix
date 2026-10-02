@@ -86,9 +86,11 @@ export default function PlanPage() {
     return true;
   }) || [];
 
-  const categories = [...new Set(plan?.plan?.items?.map((item: any) => 
-    item.id.split('-')[1] || 'OTHER'
-  ))] || [];
+  const categories = Array.from(new Set<string>(
+    plan?.plan?.items?.map((item: any) =>
+      item.id.split('-')[1] || 'OTHER'
+    ) ?? []
+  ));
 
   return (
     <div className="min-h-screen bg-background">
@@ -168,7 +170,7 @@ export default function PlanPage() {
                     <div className="flex flex-wrap gap-2">
                       {Object.entries(plan.summary?.categories || {}).map(([cat, count]) => (
                         <span key={cat} className="px-2 py-0.5 text-xs bg-primary/20 text-primary rounded">
-                          {cat}: {count}
+                          {cat}: {String(count)}
                         </span>
                       ))}
                     </div>
@@ -178,7 +180,7 @@ export default function PlanPage() {
                     <div className="flex flex-wrap gap-2">
                       {Object.entries(plan.summary?.source_breakdown || {}).map(([src, count]) => (
                         <span key={src} className="px-2 py-0.5 text-xs bg-green-500/20 text-green-400 rounded">
-                          {src}: {count}
+                          {src}: {String(count)}
                         </span>
                       ))}
                     </div>

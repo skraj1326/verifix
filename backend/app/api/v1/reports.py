@@ -1,30 +1,36 @@
-"""Professional Verification Report Generator API endpoints."""
+"""Professional Verification Report Generator API endpoints.
+
+Every metric emitted by this module is derived from persisted database rows.
+When evidence is missing the section reports UNKNOWN instead of inventing a
+number, and no sign-off or pass/fail claim is ever made without stored proof.
+"""
+
+import html
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
-from datetime import datetime
-import io
 
-from app.engines.rtl_parser.parser import RTLParser
-from app.engines.knowledge_graph.builder import KnowledgeGraphBuilder
-from app.engines.verification_planner.planner import VerificationPlanGenerator
-from app.engines.assertion_generator.generator import AssertionGenerator
-from app.engines.test_generator.generator import TestGenerator
-from app.engines.coverage_engine.analyzer import CoverageAnalyzer
-from app.engines.log_analyzer.analyzer import LogAnalyzer
-from app.engines.root_cause_engine.engine import RootCauseEngine
-from app.services.verification_service import VerificationService
+from app.models.database import TestStatus
 
 router = APIRouter(prefix="/reports", tags=["Verification Reports"])
+
+# Coverage targets are policy, not evidence, so they are surfaced explicitly.
+DEFAULT_COVERAGE_TARGET = 90.0
+
+
+def esc(value: Any) -> str:
+    """HTML-escape any value before embedding it in report markup."""
+    return html.escape("" if value is None else str(value), quote=True)
 
 
 class ReportRequest(BaseModel):
     project_id: str
     simulation_id: Optional[str] = None
-    format: str = "html"  # html, pdf, json
+    format: str = "html"
     include_sections: Optional[List[str]] = None
-    template: str = "standard"  # standard, executive, detailed
+    template: str = "standard"
 
 
 class ReportSection(BaseModel):
@@ -32,7 +38,7 @@ class ReportSection(BaseModel):
     title: str
     content: str
     order: int
-    type: str  # text, table, chart, list
+    type: str
 
 
 class VerificationReport(BaseModel):
@@ -45,434 +51,632 @@ class VerificationReport(BaseModel):
     metadata: Dict[str, Any]
 
 
+def _status_value(status: Any) -> str:
+    return getattr(status, "value", status) if status is not None else "unknown"
+
+
+def _mean(values: List[Optional[float]]) -> Optional[float]:
+    real = [v for v in values if v is not None]
+    if not real:
+        return None
+    return round(sum(real) / len(real), 2)
+
+
 @router.post("/generate", response_model=VerificationReport)
 async def generate_verification_report(request: ReportRequest):
-    """Generate a professional verification report."""
-    from app.core.database import AsyncSessionLocal
-    from app.models.database import Project, Design, Simulation, CoverageReport, Test, Assertion, FailureAnalysis
+    """Generate a verification report from persisted evidence only."""
     from sqlalchemy import select
 
+    from app.core.database import AsyncSessionLocal
+    from app.models.database import (
+        Assertion,
+        CoverageReport,
+        Design,
+        FailureAnalysis,
+        Project,
+        Simulation,
+        Test,
+        VerificationPlan,
+    )
+
     async with AsyncSessionLocal() as db:
-        # Get project
-        result = await db.execute(select(Project).where(Project.id == request.project_id))
-        project = result.scalar_one_or_none()
+        project = (
+            await db.execute(select(Project).where(Project.id == request.project_id))
+        ).scalar_one_or_none()
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
-        # Get designs
-        designs_result = await db.execute(
-            select(Design).where(Design.project_id == request.project_id)
-        )
-        designs = designs_result.scalars().all()
+        designs = (
+            await db.execute(select(Design).where(Design.project_id == request.project_id))
+        ).scalars().all()
 
-        # Get simulation
         simulation = None
         if request.simulation_id:
-            sim_result = await db.execute(
-                select(Simulation).where(Simulation.id == request.simulation_id)
-            )
-            simulation = sim_result.scalar_one_or_none()
+            simulation = (
+                await db.execute(select(Simulation).where(Simulation.id == request.simulation_id))
+            ).scalar_one_or_none()
+            if not simulation:
+                raise HTTPException(status_code=404, detail="Simulation not found")
 
-        # Get coverage data
-        coverage_reports = []
+        coverage_reports: List[Any] = []
         if simulation:
-            cov_result = await db.execute(
-                select(CoverageReport).where(CoverageReport.simulation_id == simulation.id)
-            )
-            coverage_reports = cov_result.scalars().all()
+            coverage_reports = (
+                await db.execute(
+                    select(CoverageReport).where(CoverageReport.simulation_id == simulation.id)
+                )
+            ).scalars().all()
 
-        # Get tests
-        tests_result = await db.execute(
-            select(Test).where(Test.project_id == request.project_id)
-        )
-        tests = tests_result.scalars().all()
+        tests = (
+            await db.execute(select(Test).where(Test.project_id == request.project_id))
+        ).scalars().all()
 
-        # Get assertions
-        assertions = []
+        assertions: List[Any] = []
         for design in designs:
-            assert_result = await db.execute(
-                select(Assertion).where(Assertion.design_id == design.id)
+            assertions.extend(
+                (
+                    await db.execute(select(Assertion).where(Assertion.design_id == design.id))
+                ).scalars().all()
             )
-            assertions.extend(assert_result.scalars().all())
 
-        # Get failure analyses
-        failures = []
+        failures: List[Any] = []
         if simulation:
-            fail_result = await db.execute(
-                select(FailureAnalysis).where(FailureAnalysis.simulation_id == simulation.id)
+            failures = (
+                await db.execute(
+                    select(FailureAnalysis).where(FailureAnalysis.simulation_id == simulation.id)
+                )
+            ).scalars().all()
+
+        plans = (
+            await db.execute(
+                select(VerificationPlan).where(VerificationPlan.project_id == request.project_id)
             )
-            failures = fail_result.scalars().all()
+        ).scalars().all()
 
-    # Generate report sections
-    sections = []
+        # Detach plain values so the section builders cannot touch the session.
+        project_name = project.name
+        design_rows = [
+            {"name": d.name, "language": d.language, "status": _status_value(d.analysis_status)}
+            for d in designs
+        ]
+        test_rows = [
+            {
+                "name": t.name,
+                "type": t.test_type or "unknown",
+                "status": _status_value(t.status),
+                "objective": t.verification_objective or "",
+            }
+            for t in tests
+        ]
+        assertion_rows = [
+            {
+                "name": a.name,
+                "type": a.assertion_type or "unknown",
+                "confidence": _status_value(a.confidence),
+                "is_verified": bool(a.is_verified),
+            }
+            for a in assertions
+        ]
+        failure_rows = [
+            {
+                "failure_type": f.failure_type or "unknown",
+                "summary": f.summary or "",
+                "confidence": _status_value(f.confidence),
+                "is_confirmed": bool(f.is_confirmed),
+            }
+            for f in failures
+        ]
+        coverage_rows = [
+            {
+                "report_type": c.report_type or "unknown",
+                "overall_coverage": c.overall_coverage,
+                "details": c.details if isinstance(c.details, dict) else {},
+                "gaps": c.gaps if isinstance(c.gaps, list) else [],
+            }
+            for c in coverage_reports
+        ]
+        plan_rows = [
+            {
+                "name": p.name,
+                "status": _status_value(p.status),
+                "item_count": len(p.items) if isinstance(p.items, list) else 0,
+                "categories": sorted(
+                    {
+                        str(i.get("category"))
+                        for i in (p.items or [])
+                        if isinstance(i, dict) and i.get("category")
+                    }
+                )
+                if isinstance(p.items, list)
+                else [],
+            }
+            for p in plans
+        ]
+        sim_info = (
+            {
+                "simulator": simulation.simulator,
+                "status": _status_value(simulation.status),
+                "started_at": simulation.started_at.isoformat() if simulation.started_at else None,
+                "completed_at": simulation.completed_at.isoformat() if simulation.completed_at else None,
+            }
+            if simulation
+            else None
+        )
 
-    # 1. Executive Summary
-    if request.include_sections is None or "executive_summary" in request.include_sections:
-        sections.append(ReportSection(
-            id="executive_summary",
-            title="Executive Summary",
-            content=generate_executive_summary(project, designs, simulation, coverage_reports, tests),
-            order=1,
-            type="text"
-        ))
+    sections: List[ReportSection] = []
+    wanted = request.include_sections
 
-    # 2. Design Overview
-    if request.include_sections is None or "design_overview" in request.include_sections:
-        sections.append(ReportSection(
-            id="design_overview",
-            title="Design Overview",
-            content=generate_design_overview(designs),
-            order=2,
-            type="table"
-        ))
+    def include(section_id: str) -> bool:
+        return wanted is None or section_id in wanted
 
-    # 3. Verification Plan
-    if request.include_sections is None or "verification_plan" in request.include_sections:
-        sections.append(ReportSection(
-            id="verification_plan",
-            title="Verification Plan",
-            content=generate_verification_plan_section(designs),
-            order=3,
-            type="list"
-        ))
+    if include("executive_summary"):
+        sections.append(
+            ReportSection(
+                id="executive_summary",
+                title="Executive Summary",
+                content=generate_executive_summary(
+                    project_name, design_rows, sim_info, coverage_rows, test_rows
+                ),
+                order=1,
+                type="text",
+            )
+        )
 
-    # 4. Assertions
-    if request.include_sections is None or "assertions" in request.include_sections:
-        sections.append(ReportSection(
-            id="assertions",
-            title="Assertions",
-            content=generate_assertions_section(assertions),
-            order=4,
-            type="table"
-        ))
+    if include("design_overview"):
+        sections.append(
+            ReportSection(
+                id="design_overview",
+                title="Design Overview",
+                content=generate_design_overview(design_rows),
+                order=2,
+                type="table",
+            )
+        )
 
-    # 5. Tests
-    if request.include_sections is None or "tests" in request.include_sections:
-        sections.append(ReportSection(
-            id="tests",
-            title="Tests",
-            content=generate_tests_section(tests),
-            order=5,
-            type="table"
-        ))
+    if include("verification_plan"):
+        sections.append(
+            ReportSection(
+                id="verification_plan",
+                title="Verification Plan",
+                content=generate_verification_plan_section(plan_rows),
+                order=3,
+                type="list",
+            )
+        )
 
-    # 6. Coverage
-    if request.include_sections is None or "coverage" in request.include_sections:
-        sections.append(ReportSection(
-            id="coverage",
-            title="Coverage Analysis",
-            content=generate_coverage_section(coverage_reports),
-            order=6,
-            type="chart"
-        ))
+    if include("assertions"):
+        sections.append(
+            ReportSection(
+                id="assertions",
+                title="Assertions",
+                content=generate_assertions_section(assertion_rows),
+                order=4,
+                type="table",
+            )
+        )
 
-    # 7. Failures & Issues
-    if request.include_sections is None or "failures" in request.include_sections:
-        sections.append(ReportSection(
-            id="failures",
-            title="Failures & Issues",
-            content=generate_failures_section(failures),
-            order=7,
-            type="list"
-        ))
+    if include("tests"):
+        sections.append(
+            ReportSection(
+                id="tests",
+                title="Tests",
+                content=generate_tests_section(test_rows),
+                order=5,
+                type="table",
+            )
+        )
 
-    # 8. Traceability Matrix
-    if request.include_sections is None or "traceability" in request.include_sections:
-        sections.append(ReportSection(
-            id="traceability",
-            title="Requirement Traceability Matrix",
-            content=generate_traceability_matrix(designs, tests, assertions, coverage_reports),
-            order=8,
-            type="table"
-        ))
+    if include("coverage"):
+        sections.append(
+            ReportSection(
+                id="coverage",
+                title="Coverage Analysis",
+                content=generate_coverage_section(coverage_rows),
+                order=6,
+                type="chart",
+            )
+        )
 
-    # 9. Conclusions & Recommendations
-    if request.include_sections is None or "conclusions" in request.include_sections:
-        sections.append(ReportSection(
-            id="conclusions",
-            title="Conclusions & Recommendations",
-            content=generate_conclusions(coverage_reports, tests, failures),
-            order=9,
-            type="text"
-        ))
+    if include("failures"):
+        sections.append(
+            ReportSection(
+                id="failures",
+                title="Failures & Issues",
+                content=generate_failures_section(failure_rows),
+                order=7,
+                type="list",
+            )
+        )
 
-    # 10. Appendices
-    if request.include_sections is None or "appendices" in request.include_sections:
-        sections.append(ReportSection(
-            id="appendices",
-            title="Appendices",
-            content=generate_appendices(designs, simulation, tests),
-            order=10,
-            type="list"
-        ))
+    if include("traceability"):
+        sections.append(
+            ReportSection(
+                id="traceability",
+                title="Requirement Traceability Matrix",
+                content=generate_traceability_matrix(),
+                order=8,
+                type="table",
+            )
+        )
 
-    report = VerificationReport(
-        id=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+    if include("conclusions"):
+        sections.append(
+            ReportSection(
+                id="conclusions",
+                title="Conclusions & Recommendations",
+                content=generate_conclusions(coverage_rows, test_rows, failure_rows),
+                order=9,
+                type="text",
+            )
+        )
+
+    if include("appendices"):
+        sections.append(
+            ReportSection(
+                id="appendices",
+                title="Appendices",
+                content=generate_appendices(design_rows, sim_info, test_rows),
+                order=10,
+                type="list",
+            )
+        )
+
+    return VerificationReport(
+        id=f"report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
         project_id=request.project_id,
-        title=f"Verification Report - {project.name}",
-        generated_at=datetime.now(),
+        title=f"Verification Report - {project_name}",
+        generated_at=datetime.utcnow(),
         format=request.format,
         sections=sections,
         metadata={
-            "project_name": project.name,
+            "project_name": project_name,
             "simulation_id": request.simulation_id,
             "template": request.template,
             "total_sections": len(sections),
-        }
+            "evidence_policy": "All metrics derived from persisted rows; gaps reported as UNKNOWN.",
+            "coverage_target": DEFAULT_COVERAGE_TARGET,
+        },
     )
-
-    return report
 
 
 @router.get("/{report_id}")
 async def get_report(report_id: str):
-    """Get a previously generated report."""
-    # In production, this would fetch from database
-    raise HTTPException(status_code=404, detail="Report not found")
+    """Reports are generated on demand and not persisted, so none can be fetched."""
+    raise HTTPException(
+        status_code=404,
+        detail="Report not found. Reports are generated on demand and are not persisted.",
+    )
 
 
-@router.post("/export/{report_id}")
-async def export_report(report_id: str, format: str = "html"):
-    """Export report in specified format."""
-    # In production, this would generate HTML/PDF from report data
-    return {"message": f"Report export in {format} format initiated"}
+@router.post("/export/{report_id}", response_class=Response)
+async def export_report(report_id: str, request: ReportRequest):
+    """Export a freshly generated report as HTML or JSON.
+
+    Reports are not persisted, so the report_id is not a lookup key; the caller
+    supplies the same ReportRequest used for generation and the rendered document
+    is returned.
+    """
+    if request.format not in {"html", "json"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported export format '{request.format}'. PDF export is not implemented.",
+        )
+
+    report = await generate_verification_report(request)
+    payload = report.model_dump(mode="json")
+
+    if request.format == "json":
+        import json
+
+        return Response(
+            content=json.dumps(payload, indent=2),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{report.id}.json"'},
+        )
+
+    return Response(
+        content=render_html_document(report),
+        media_type="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{report.id}.html"'},
+    )
 
 
-def generate_executive_summary(project, designs, simulation, coverage_reports, tests) -> str:
-    """Generate executive summary text."""
-    total_modules = len(designs)
-    total_tests = len(tests)
-    total_covergroups = sum(len(cr.details) for cr in coverage_reports) if coverage_reports else 0
-    overall_coverage = coverage_reports[-1].overall_coverage if coverage_reports else 0
+def render_html_document(report: VerificationReport) -> str:
+    """Render a full standalone HTML document for a report."""
+    sections_html = "\n".join(
+        f'<section id="{esc(s.id)}"><h2>{esc(s.title)}</h2>{s.content}</section>'
+        for s in report.sections
+    )
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>{esc(report.title)}</title>
+<style>
+ body {{ font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        margin: 2rem auto; max-width: 60rem; color: #1f2937; line-height: 1.55; }}
+ h1 {{ border-bottom: 2px solid #111827; padding-bottom: .5rem; }}
+ h2 {{ margin-top: 2rem; border-bottom: 1px solid #d1d5db; padding-bottom: .25rem; }}
+ .report-table {{ border-collapse: collapse; width: 100%; margin: .75rem 0; }}
+ .report-table th, .report-table td {{ border: 1px solid #d1d5db; padding: .4rem .6rem; text-align: left; }}
+ .report-table th {{ background: #f3f4f6; }}
+ .evidence-unknown {{ color: #b45309; font-style: italic; }}
+ .meta {{ color: #6b7280; font-size: .875rem; }}
+</style>
+</head>
+<body>
+<h1>{esc(report.title)}</h1>
+<p class="meta">Generated {esc(report.generated_at)} - template: {esc(report.metadata.get('template'))}</p>
+{sections_html}
+</body>
+</html>
+"""
+
+
+def _evidence_note(condition: bool, message: str) -> str:
+    if condition:
+        return ""
+    return f'<p class="evidence-unknown">[UNKNOWN] {esc(message)}</p>'
+
+
+def generate_executive_summary(project_name, design_rows, sim_info, coverage_rows, test_rows) -> str:
+    """Executive summary containing only stored facts."""
+    overall_values = [c["overall_coverage"] for c in coverage_rows]
+    overall = _mean(overall_values)
+
+    status_counts: Dict[str, int] = {}
+    for t in test_rows:
+        status_counts[t["status"]] = status_counts.get(t["status"], 0) + 1
+    status_line = ", ".join(f"{k}: {v}" for k, v in sorted(status_counts.items())) or "none recorded"
+
+    coverage_cell = f"{overall:.1f}%" if overall is not None else "UNKNOWN"
+    target_met = (
+        f"<p>Observed mean coverage {overall:.1f}% is at or above the configured target of "
+        f"{DEFAULT_COVERAGE_TARGET:.0f}%.</p>"
+        if overall is not None and overall >= DEFAULT_COVERAGE_TARGET
+        else ""
+    )
 
     return f"""
-    <h2>Executive Summary</h2>
-    <p>This report presents the verification results for <strong>{project.name}</strong>.</p>
-    
-    <h3>Key Metrics</h3>
+    <p>This report presents stored verification evidence for <strong>{esc(project_name)}</strong>.</p>
+    <h3>Recorded Facts</h3>
     <ul>
-        <li><strong>Total Modules:</strong> {total_modules}</li>
-        <li><strong>Total Tests Executed:</strong> {total_tests}</li>
-        <li><strong>Overall Coverage:</strong> {overall_coverage:.1f}%</li>
-        <li><strong>Covergroups Analyzed:</strong> {total_covergroups}</li>
+        <li>Designs stored: {len(design_rows)}</li>
+        <li>Tests stored: {len(test_rows)} (status breakdown - {esc(status_line)})</li>
+        <li>Mean persisted coverage across {len(coverage_rows)} stored report(s): {coverage_cell}</li>
+        <li>Simulation referenced: {esc(sim_info['simulator']) if sim_info else 'none supplied'}</li>
     </ul>
-    
-    <h3>Verification Status</h3>
-    <p>The verification effort has {'achieved' if overall_coverage >= 90 else 'partially achieved' if overall_coverage >= 75 else 'not achieved'} the target coverage goals.
-    {'All critical assertions passed.' if overall_coverage >= 90 else 'Some assertions need attention.'}</p>
-    
-    <h3>Key Findings</h3>
-    <ul>
-        <li>Design consists of {total_modules} modules with comprehensive verification infrastructure</li>
-        <li>{total_tests} tests executed covering functional, corner case, and protocol scenarios</li>
-        <li>Overall coverage of {overall_coverage:.1f}% {'meets' if overall_coverage >= 90 else 'partially meets' if overall_coverage >= 75 else 'does not meet'} sign-off criteria</li>
-    </ul>
+    {target_met}
+    <h3>Evidence Limitations</h3>
+    {_evidence_note(bool(coverage_rows), "No persisted coverage reports were supplied, so no coverage claim can be made.")}
+    {_evidence_note(any(t['status'] in (TestStatus.PASSED.value, TestStatus.FAILED.value) for t in test_rows), "No executed test results are stored for this project; pass/fail status is UNKNOWN.")}
+    <p class="evidence-unknown">[UNKNOWN] Sign-off status is not asserted by this report.</p>
     """
 
 
-def generate_design_overview(designs) -> str:
-    """Generate design overview table."""
-    html = "<h2>Design Overview</h2>"
-    for design in designs:
-        html += f"""
-        <h3>{design.name}</h3>
-        <table class="report-table">
-            <tr><th>Property</th><th>Value</th></tr>
-            <tr><td>Language</td><td>{design.language}</td></tr>
-            <tr><td>Analysis Status</td><td>{design.analysis_status}</td></tr>
-        </table>
-        """
-    return html
+def generate_design_overview(design_rows) -> str:
+    if not design_rows:
+        return '<h2>Design Overview</h2><p class="evidence-unknown">[UNKNOWN] No designs stored.</p>'
+    html_out = "<h2>Design Overview</h2><table class=\"report-table\">"
+    html_out += "<tr><th>Design</th><th>Language</th><th>Analysis Status</th></tr>"
+    for d in design_rows:
+        html_out += (
+            f"<tr><td>{esc(d['name'])}</td><td>{esc(d['language'])}</td>"
+            f"<td>{esc(d['status'])}</td></tr>"
+        )
+    return html_out + "</table>"
 
 
-def generate_verification_plan_section(designs) -> str:
-    """Generate verification plan section."""
-    # This would use the VerificationPlanGenerator in production
-    return """
-    <h2>Verification Plan</h2>
-    <p>Auto-generated verification plan based on RTL analysis.</p>
-    <table class="report-table">
-        <tr><th>Category</th><th>Items</th><th>Priority</th></tr>
-        <tr><td>Functional</td><td>12</td><td>High</td></tr>
-        <tr><td>Protocol</td><td>8</td><td>High</td></tr>
-        <tr><td>Corner Case</td><td>6</td><td>Medium</td></tr>
-        <tr><td>Coverage</td><td>10</td><td>High</td></tr>
-    </table>
+def generate_verification_plan_section(plan_rows) -> str:
+    """Render only plans that were actually persisted."""
+    if not plan_rows:
+        return (
+            "<h2>Verification Plan</h2>"
+            '<p class="evidence-unknown">[UNKNOWN] No verification plan has been persisted for this '
+            "project, so no plan content is shown.</p>"
+        )
+
+    html_out = "<h2>Verification Plan</h2><table class=\"report-table\">"
+    html_out += "<tr><th>Plan</th><th>Status</th><th>Items Stored</th><th>Categories</th></tr>"
+    for p in plan_rows:
+        cats = ", ".join(p["categories"]) if p["categories"] else "none recorded"
+        html_out += (
+            f"<tr><td>{esc(p['name'])}</td><td>{esc(p['status'])}</td>"
+            f"<td>{p['item_count']}</td><td>{esc(cats)}</td></tr>"
+        )
+    html_out += "</table>"
+    return html_out
+
+
+def generate_assertions_section(assertion_rows) -> str:
+    if not assertion_rows:
+        return '<h2>Assertions</h2><p class="evidence-unknown">[UNKNOWN] No assertions stored.</p>'
+    html_out = (
+        "<h2>Assertions</h2><table class=\"report-table\">"
+        "<tr><th>Name</th><th>Type</th><th>Confidence</th><th>Verified</th></tr>"
+    )
+    for a in assertion_rows:
+        html_out += (
+            f"<tr><td>{esc(a['name'])}</td><td>{esc(a['type'])}</td>"
+            f"<td>{esc(a['confidence'])}</td>"
+            f"<td>{'yes' if a['is_verified'] else 'no'}</td></tr>"
+        )
+    return html_out + "</table>"
+
+
+def generate_tests_section(test_rows) -> str:
+    if not test_rows:
+        return '<h2>Tests</h2><p class="evidence-unknown">[UNKNOWN] No tests stored.</p>'
+    html_out = (
+        "<h2>Tests</h2><table class=\"report-table\">"
+        "<tr><th>Name</th><th>Type</th><th>Status</th><th>Objective</th></tr>"
+    )
+    for t in test_rows:
+        objective = (t["objective"] or "")[:80]
+        html_out += (
+            f"<tr><td>{esc(t['name'])}</td><td>{esc(t['type'])}</td>"
+            f"<td>{esc(t['status'])}</td><td>{esc(objective)}</td></tr>"
+        )
+    return html_out + "</table>"
+
+
+def generate_coverage_section(coverage_rows) -> str:
+    """Coverage section built strictly from persisted CoverageReport rows."""
+    if not coverage_rows:
+        return (
+            "<h2>Coverage Analysis</h2>"
+            '<p class="evidence-unknown">[UNKNOWN] No persisted coverage evidence.</p>'
+        )
+
+    overall_values = [c["overall_coverage"] for c in coverage_rows]
+    overall = _mean(overall_values)
+
+    html_out = "<h2>Coverage Analysis</h2>"
+    html_out += f"<h3>Mean persisted coverage: {overall:.1f}%</h3>" if overall is not None else (
+        '<h3 class="evidence-unknown">[UNKNOWN] Mean persisted coverage</h3>'
+    )
+    html_out += (
+        "<table class=\"report-table\"><tr><th>Type</th><th>Coverage %</th>"
+        "<th>Covered</th><th>Total</th><th>Module</th></tr>"
+    )
+    for c in coverage_rows:
+        details = c["details"]
+        html_out += (
+            f"<tr><td>{esc(c['report_type'])}</td>"
+            f"<td>{c['overall_coverage']:.1f}%</td>"
+            f"<td>{esc(details.get('covered', 'UNKNOWN'))}</td>"
+            f"<td>{esc(details.get('total', 'UNKNOWN'))}</td>"
+            f"<td>{esc(details.get('module') or 'UNKNOWN')}</td></tr>"
+        )
+    html_out += "</table>"
+
+    all_gaps = [g for c in coverage_rows for g in c["gaps"] if isinstance(g, dict)]
+    if all_gaps:
+        html_out += f"<h3>Coverage Gaps ({len(all_gaps)})</h3>"
+        html_out += (
+            "<table class=\"report-table\"><tr><th>Type</th><th>Description</th>"
+            "<th>Location</th><th>Suggested Test</th></tr>"
+        )
+        for gap in all_gaps[:25]:
+            loc = gap.get("rtl_location", {}) or {}
+            location = ", ".join(f"{k}={esc(v)}" for k, v in loc.items()) or "UNKNOWN"
+            html_out += (
+                f"<tr><td>{esc(gap.get('gap_type', 'unknown'))}</td>"
+                f"<td>{esc(gap.get('description', ''))}</td>"
+                f"<td>{location}</td>"
+                f"<td>{esc(gap.get('suggested_test', ''))}</td></tr>"
+            )
+        html_out += "</table>"
+    else:
+        html_out += '<p class="evidence-unknown">[UNKNOWN] No coverage gaps recorded.</p>'
+
+    return html_out
+
+
+def generate_failures_section(failure_rows) -> str:
+    if not failure_rows:
+        return (
+            "<h2>Failures &amp; Issues</h2>"
+            '<p class="evidence-unknown">[UNKNOWN] No failure analyses stored for this simulation.</p>'
+        )
+    html_out = (
+        "<h2>Failures &amp; Issues</h2><table class=\"report-table\">"
+        "<tr><th>Type</th><th>Summary</th><th>Confidence</th><th>Confirmed</th></tr>"
+    )
+    for f in failure_rows:
+        html_out += (
+            f"<tr><td>{esc(f['failure_type'])}</td>"
+            f"<td>{esc((f['summary'] or '')[:100])}</td>"
+            f"<td>{esc(f['confidence'])}</td>"
+            f"<td>{'yes' if f['is_confirmed'] else 'no'}</td></tr>"
+        )
+    return html_out + "</table>"
+
+
+def generate_traceability_matrix() -> str:
+    """Traceability cannot be stated without a persisted requirement store.
+
+    Requirements are parsed into transient engine output today and are never
+    persisted, so this section explicitly reports UNKNOWN rather than inventing
+    requirement/assertion/test/coverage rows.
     """
+    return (
+        "<h2>Requirement Traceability Matrix</h2>"
+        '<p class="evidence-unknown">[UNKNOWN] Requirement traceability cannot be reported.</p>'
+        "<p>Requirements parsed from specifications are not yet persisted to a requirement "
+        "store, so no requirement-to-assertion-to-test mapping exists as evidence. "
+        "Persist requirements before sign-off so this matrix can be generated from real data.</p>"
+    )
 
 
-def generate_assertions_section(assertions) -> str:
-    """Generate assertions section."""
-    if not assertions:
-        return "<h2>Assertions</h2><p>No assertions found.</p>"
-    
-    html = "<h2>Assertions</h2>"
-    html += """
-    <table class="report-table">
-        <tr><th>Name</th><th>Type</th><th>Confidence</th><th>Status</th></tr>
-    """
-    for a in assertions:
-        html += f"""
-        <tr>
-            <td>{a.name}</td>
-            <td>{a.assertion_type}</td>
-            <td>{a.confidence}</td>
-            <td>{'Verified' if a.is_verified else 'Pending'}</td>
-        </tr>
-        """
-    html += "</table>"
-    return html
+def generate_conclusions(coverage_rows, test_rows, failure_rows) -> str:
+    """Conclusions that state observations without asserting sign-off."""
+    overall = _mean([c["overall_coverage"] for c in coverage_rows])
 
+    passed = sum(1 for t in test_rows if t["status"] == TestStatus.PASSED.value)
+    failed = sum(1 for t in test_rows if t["status"] == TestStatus.FAILED.value)
+    executed = passed + failed
 
-def generate_tests_section(tests) -> str:
-    """Generate tests section."""
-    if not tests:
-        return "<h2>Tests</h2><p>No tests generated.</p>"
-    
-    html = "<h2>Tests</h2>"
-    html += """
-    <table class="report-table">
-        <tr><th>Name</th><th>Type</th><th>Status</th><th>Objective</th></tr>
-    """
-    for t in tests:
-        html += f"""
-        <tr>
-            <td>{t.name}</td>
-            <td>{t.test_type}</td>
-            <td>{t.status}</td>
-            <td>{t.verification_objective[:50]}...</td>
-        </tr>
-        """
-    html += "</table>"
-    return html
+    summary = [
+        f"Coverage evidence: {'mean %.1f%% across %d stored report(s)' % (overall, len(coverage_rows)) if overall is not None else 'UNKNOWN'}",
+        f"Executed tests: {executed} of {len(test_rows)} stored (passed {passed}, failed {failed})",
+        f"Stored failure analyses: {len(failure_rows)}",
+    ]
 
+    recommendations = []
+    if overall is not None and overall < DEFAULT_COVERAGE_TARGET:
+        recommendations.append(
+            f"Persisted coverage ({overall:.1f}%) is below the configured target of "
+            f"{DEFAULT_COVERAGE_TARGET:.0f}%; close the recorded gaps."
+        )
+    if executed == 0 and test_rows:
+        recommendations.append(
+            "Tests are generated but not executed; run the regression to obtain execution evidence."
+        )
+    if failure_rows:
+        recommendations.append(
+            f"Investigate {len(failure_rows)} stored failure analysis record(s)."
+        )
+    recommendations.append(
+        "Persist requirements and verification plans to enable traceability reporting."
+    )
 
-def generate_coverage_section(coverage_reports) -> str:
-    """Generate coverage analysis section."""
-    if not coverage_reports:
-        return "<h2>Coverage Analysis</h2><p>No coverage data available.</p>"
-    
-    latest = coverage_reports[-1]
-    html = f"""
-    <h2>Coverage Analysis</h2>
-    <h3>Overall Coverage: {latest.overall_coverage:.1f}%</h3>
-    <table class="report-table">
-        <tr><th>Type</th><th>Coverage</th><th>Covered</th><th>Total</th></tr>
-    """
-    for cov_type, data in latest.details.items():
-        html += f"""
-        <tr>
-            <td>{cov_type}</td>
-            <td>{data.overall:.1f}%</td>
-            <td>{data.covered}</td>
-            <td>{data.total}</td>
-        </tr>
-        """
-    html += "</table>"
-    
-    if latest.gaps:
-        html += f"""
-        <h3>Coverage Gaps ({len(latest.gaps)})</h3>
-        <table class="report-table">
-            <tr><th>Type</th><th>Description</th><th>Severity</th></tr>
-        """
-        for gap in latest.gaps[:10]:
-            html += f"""
-            <tr>
-                <td>{gap.get('gap_type', 'unknown')}</td>
-                <td>{gap.get('description', '')}</td>
-                <td>{gap.get('severity', 'medium')}</td>
-            </tr>
-            """
-        html += "</table>"
-    
-    return html
+    rec_html = "".join(f"<li>{esc(r)}</li>" for r in recommendations)
 
-
-def generate_failures_section(failures) -> str:
-    """Generate failures section."""
-    if not failures:
-        return "<h2>Failures & Issues</h2><p>No failures recorded.</p>"
-    
-    html = "<h2>Failures & Issues</h2>"
-    html += """
-    <table class="report-table">
-        <tr><th>Type</th><th>Summary</th><th>Confidence</th><th>Status</th></tr>
-    """
-    for f in failures:
-        html += f"""
-        <tr>
-            <td>{f.failure_type}</td>
-            <td>{f.summary[:100]}...</td>
-            <td>{f.confidence}</td>
-            <td>{'Confirmed' if f.is_confirmed else 'Under Investigation'}</td>
-        </tr>
-        """
-    html += "</table>"
-    return html
-
-
-def generate_traceability_matrix(designs, tests, assertions, coverage_reports) -> str:
-    """Generate requirement traceability matrix."""
-    return """
-    <h2>Requirement Traceability Matrix</h2>
-    <p>Mapping requirements to verification artifacts.</p>
-    <table class="report-table">
-        <tr><th>Requirement</th><th>Plan Item</th><th>Assertion</th><th>Test</th><th>Coverage</th><th>Status</th></tr>
-        <tr><td>REQ-001</td><td>VP-001</td><td>A-001</td><td>T-001</td><td>100%</td><td>Verified</td></tr>
-        <tr><td>REQ-002</td><td>VP-002</td><td>A-002</td><td>T-002</td><td>95%</td><td>Verified</td></tr>
-    </table>
-    """
-
-
-def generate_conclusions(coverage_reports, tests, failures) -> str:
-    """Generate conclusions and recommendations."""
-    overall_coverage = coverage_reports[-1].overall_coverage if coverage_reports else 0
-    passed_tests = len([t for t in tests if t.status == "passed"])
-    failed_tests = len([t for t in tests if t.status == "failed"])
-    
     return f"""
-    <h2>Conclusions & Recommendations</h2>
-    
-    <h3>Verification Status</h3>
-    <p>The verification effort has {'successfully met' if overall_coverage >= 90 else 'partially met' if overall_coverage >= 75 else 'not met'} the coverage targets.</p>
-    
-    <h3>Summary</h3>
-    <ul>
-        <li>Overall Coverage: {overall_coverage:.1f}%</li>
-        <li>Tests Passed: {passed_tests}/{len(tests)}</li>
-        <li>Tests Failed: {failed_tests}/{len(tests)}</li>
-        <li>Failures Under Investigation: {len(failures)}</li>
-    </ul>
-    
+    <h2>Conclusions &amp; Recommendations</h2>
+    <h3>Observations</h3>
+    <ul>{"".join(f"<li>{esc(s)}</li>" for s in summary)}</ul>
+    <p class="evidence-unknown">[UNKNOWN] This report does not assert sign-off or verification
+    completion; no formal sign-off evidence is stored.</p>
     <h3>Recommendations</h3>
-    <ol>
-        <li>{'Maintain current coverage levels' if overall_coverage >= 90 else 'Focus on improving coverage in identified gap areas'}</li>
-        <li>Investigate and resolve {len(failures)} failure(s)</li>
-        <li>Add targeted tests for uncovered coverpoints</li>
-        <li>Review and update assertions for better coverage</li>
-        <li>Consider formal verification for critical modules</li>
-    </ol>
+    <ol>{rec_html}</ol>
     """
 
 
-def generate_appendices(designs, simulation, tests) -> str:
-    """Generate appendices."""
+def generate_appendices(design_rows, sim_info, test_rows) -> str:
+    design_items = "".join(
+        f"<li>{esc(d['name'])} ({esc(d['language'])}) - {esc(d['status'])}</li>" for d in design_rows
+    ) or "<li>UNKNOWN - no designs stored</li>"
+    test_items = "".join(
+        f"<li>{esc(t['name'])} ({esc(t['type'])}) - {esc(t['status'])}</li>" for t in test_rows
+    ) or "<li>UNKNOWN - no tests stored</li>"
+
+    if sim_info:
+        sim_block = (
+            f"<p>Simulator: {esc(sim_info['simulator'])}</p>"
+            f"<p>Status: {esc(sim_info['status'])}</p>"
+            f"<p>Started: {esc(sim_info['started_at'] or 'UNKNOWN')}</p>"
+            f"<p>Completed: {esc(sim_info['completed_at'] or 'UNKNOWN')}</p>"
+        )
+    else:
+        sim_block = '<p class="evidence-unknown">[UNKNOWN] No simulation supplied.</p>'
+
     return f"""
     <h2>Appendices</h2>
     <h3>Appendix A: Design List</h3>
-    <ul>{"".join(f"<li>{d.name} ({d.language})</li>" for d in designs)}</ul>
-    
+    <ul>{design_items}</ul>
     <h3>Appendix B: Test List</h3>
-    <ul>{"".join(f"<li>{t.name} ({t.test_type}) - {t.status}</li>" for t in tests)}</ul>
-    
+    <ul>{test_items}</ul>
     <h3>Appendix C: Simulation Details</h3>
-    <p>Simulation: {simulation.simulator if simulation else 'N/A'}</p>
-    <p>Completed: {simulation.completed_at if simulation else 'N/A'}</p>
+    {sim_block}
     """
-
-
-# ============================================================
-# FRONTEND: Report Generator Page
-# ============================================================
-# File: frontend/app/reports/page.tsx

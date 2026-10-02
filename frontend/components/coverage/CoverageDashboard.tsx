@@ -27,6 +27,8 @@ import {
   RefreshCw,
   ChevronRight,
   ChevronDown,
+  ChevronLeft,
+  GitBranch,
   Eye,
   ArrowLeft,
 } from "lucide-react";
@@ -78,40 +80,6 @@ interface Gap {
   suggested_test: string;
 }
 
-import React, { useState, useEffect, useCallback } from "react";
-import {
-  BarChart,
-  Bar,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
-  Cell,
-  PieChart,
-  Pie,
-} from "recharts";
-import {
-  BarChart2,
-  TrendingUp,
-  TrendingDown,
-  Target,
-  AlertTriangle,
-  Search,
-  Download,
-  RefreshCw,
-  ChevronRight,
-  ChevronDown,
-  Eye,
-  ArrowLeft,
-} from "lucide-react";
-import { cn } from "@/lib/utils";
-import { api } from "@/lib/api";
-import { useRouter, useSearchParams } from "next/navigation";
-
 const formatCoverage = (val: number) => `${val.toFixed(1)}%`;
 
 const getCoverageColor = (val: number) => {
@@ -127,33 +95,43 @@ const getTrendIcon = (before: number, after: number) => {
   return null;
 };
 
-const build_mock_bins = (coverpointName: string) => {
-  const binsMap: Record<string, any[]> = {
-    count_cp: [
-      { name: "count_0", covered: true, hits: 45, expression: "count == 0" },
-      { name: "count_1_to_7", covered: true, hits: 12, expression: "count in [1:7]" },
-      { name: "count_8_to_14", covered: false, hits: 0, expression: "count in [8:14]" },
-      { name: "count_15", covered: true, hits: 3, expression: "count == 15 (DEPTH)" },
-    ],
-    wr_ptr_cp: [
-      ...Array.from({ length: 16 }, (_, i) => ({
-        name: `wr_ptr_${i}`,
-        covered: i < 15,
-        hits: i < 15 ? 5 : 0,
-        expression: `wr_ptr == ${i}`,
-      })),
-    ],
-    simultaneous_rw_cp: [
-      { name: "simul_write_read", covered: true, hits: 8, expression: "wr_en && rd_en" },
-      { name: "simul_write_read_full", covered: false, hits: 0, expression: "wr_en && rd_en && full" },
-      { name: "simul_write_read_empty", covered: false, hits: 0, expression: "wr_en && rd_en && empty" },
-    ],
-  };
-  return binsMap[coverpointName] || [
-    { name: "bin_0", covered: true, hits: 10, expression: "default" },
-    { name: "bin_1", covered: false, hits: 0, expression: "other" },
-  ];
-};
+function GapRow({ gap, compact }: { gap: any; compact?: boolean }) {
+  return (
+    <div className={cn("border border-gray-700 rounded-lg hover:border-red-500 transition-colors", compact ? "p-4 bg-gray-800/50" : "p-3 bg-gray-800/50")}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <span
+              className={cn(
+                "px-1.5 py-0.5 rounded text-xs font-mono",
+                gap.gap_type === "reachable_untested" && "bg-red-900/30 text-red-300",
+                gap.gap_type === "potentially_unreachable" && "bg-yellow-900/30 text-yellow-300",
+                "bg-gray-700 text-gray-300"
+              )}
+            >
+              {String(gap.gap_type ?? "UNKNOWN").replace(/_/g, " ")}
+            </span>
+            <span className="text-sm text-gray-400 font-mono">
+              {gap.rtl_location?.module ?? "UNKNOWN"}:{gap.rtl_location?.line ?? "?"}
+            </span>
+          </div>
+          <p className={cn("text-sm text-gray-300", compact ? "mb-2" : "truncate")}>{gap.description ?? "No description recorded"}</p>
+          <div className={cn("flex items-center text-xs text-gray-500", compact ? "gap-4" : "gap-2 mt-1")}>
+            <span>Impact: {gap.estimated_impact != null ? `${gap.estimated_impact.toFixed(1)}%` : "UNKNOWN"}</span>
+            <span>Coverage: {gap.coverage_before != null ? formatCoverage(gap.coverage_before) : "UNKNOWN"}</span>
+            {compact && <span className="font-mono">{gap.coverage_type ?? "UNKNOWN"}</span>}
+          </div>
+        </div>
+        <button
+          className="px-2 py-1 text-xs bg-blue-900/30 text-blue-300 rounded hover:bg-blue-900/50 whitespace-nowrap"
+          title="Generate targeted test"
+        >
+          Generate Test
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export function CoverageDashboard({ projectId, simulationId }: { projectId: string; simulationId?: string }) {
   const [dashboard, setDashboard] = useState<any>(null);
@@ -165,6 +143,9 @@ export function CoverageDashboard({ projectId, simulationId }: { projectId: stri
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [drilldown, setDrilldown] = useState<"covergroups" | "coverpoints" | "bins" | null>(null);
+  const [bins, setBins] = useState<any[]>([]);
+  const [binsEvidence, setBinsEvidence] = useState<string>("UNKNOWN");
+  const [binsLoading, setBinsLoading] = useState(false);
 
   const fetchDashboard = useCallback(async () => {
     if (!projectId) return;
@@ -190,25 +171,31 @@ export function CoverageDashboard({ projectId, simulationId }: { projectId: stri
     }
   }, [projectId]);
 
+  const fetchBins = useCallback(async () => {
+    if (!projectId || !selectedCovergroup || !selectedCoverpoint) return;
+    const moduleName = dashboard?.covergroups?.find((g: any) => g.name === selectedCovergroup)?.module || "";
+    setBinsLoading(true);
+    try {
+      const res = await api.getBinDetails(projectId, moduleName, selectedCovergroup, selectedCoverpoint);
+      setBins(res.data.bins || []);
+      setBinsEvidence(res.data.evidence || "UNKNOWN");
+    } catch (err: any) {
+      setBins([]);
+      setBinsEvidence("UNKNOWN");
+      console.error("Failed to fetch bin details:", err.response?.data?.detail);
+    } finally {
+      setBinsLoading(false);
+    }
+  }, [projectId, selectedCovergroup, selectedCoverpoint, dashboard]);
+
+  useEffect(() => {
+    fetchBins();
+  }, [fetchBins]);
+
   useEffect(() => {
     fetchDashboard();
     fetchTrends();
   }, [fetchDashboard, fetchTrends]);
-
-  const formatCoverage = (val: number) => `${val.toFixed(1)}%`;
-
-  const getCoverageColor = (val: number) => {
-    if (val >= 95) return "text-green-400 bg-green-900/30";
-    if (val >= 85) return "text-yellow-400 bg-yellow-900/30";
-    if (val >= 70) return "text-orange-400 bg-orange-900/30";
-    return "text-red-400 bg-red-900/30";
-  };
-
-  const getTrendIcon = (before: number, after: number) => {
-    if (after > before) return <TrendingUp className="w-4 h-4 text-green-400" />;
-    if (after < before) return <TrendingDown className="w-4 h-4 text-red-400" />;
-    return null;
-  };
 
   if (loading) {
     return (
@@ -490,40 +477,8 @@ export function CoverageDashboard({ projectId, simulationId }: { projectId: stri
                 </h2>
                 <div className="space-y-2 max-h-64 overflow-auto">
                   {dashboard.gaps.slice(0, 10).map((gap: any, i: number) => (
-                    <div
-                      key={i}
-                      className="p-3 bg-gray-800/50 border border-gray-700 rounded-lg hover:border-red-500 transition-colors"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className={cn(
-                              "px-1.5 py-0.5 rounded text-xs font-mono",
-                              gap.gap_type === "reachable_untested" && "bg-red-900/30 text-red-300",
-                              gap.gap_type === "potentially_unreachable" && "bg-yellow-900/30 text-yellow-300",
-                              "bg-gray-700 text-gray-300"
-                            )}>
-                              {gap.gap_type.replace("_", " ")}
-                            </span>
-                            <span className="text-sm text-gray-400 font-mono">
-                              {gap.rtl_location?.module}:{gap.rtl_location?.line}
-                            </span>
-                          </div>
-                          <p className="text-sm text-gray-300 truncate">{gap.description}</p>
-                          <div className="flex items-center gap-2 mt-1 text-xs text-gray-500">
-                            <span>Impact: ~{gap.estimated_impact?.toFixed(1)}%</span>
-                            <span className="text-gray-500">Coverage: {formatCoverage(gap.coverage_before)}</span>
-                          </div>
-                        </div>
-                        <button
-                          className="px-2 py-1 text-xs bg-blue-900/30 text-blue-300 rounded hover:bg-blue-900/50 whitespace-nowrap"
-                          title="Generate targeted test"
-                        >
-                          Generate Test
-                        </button>
-                      </div>
-                    ))}
-                  </div>
+                    <GapRow key={i} gap={gap} />
+                  ))}
                 </div>
               </div>
             )}
@@ -663,6 +618,16 @@ export function CoverageDashboard({ projectId, simulationId }: { projectId: stri
                 </button>
                 <h2 className="text-lg font-semibold text-white">{selectedCoverpoint}</h2>
                 <span className="px-2 py-0.5 text-xs bg-green-900/30 text-green-300 rounded">Bins</span>
+                <span
+                  className={cn(
+                    "px-2 py-0.5 text-xs rounded",
+                    binsEvidence === "FACT"
+                      ? "bg-blue-900/30 text-blue-300"
+                      : "bg-amber-900/30 text-amber-300"
+                  )}
+                >
+                  {binsEvidence}
+                </span>
               </div>
             </div>
             <div className="overflow-x-auto">
@@ -676,21 +641,38 @@ export function CoverageDashboard({ projectId, simulationId }: { projectId: stri
                   </tr>
                 </thead>
                 <tbody>
-                  {build_mock_bins(selectedCoverpoint).map((bin: any) => (
-                    <tr key={bin.name} className="border-b border-gray-800 hover:bg-gray-800/50">
-                      <td className="p-3 font-mono text-white">{bin.name}</td>
-                      <td className="p-3 text-gray-300 font-mono text-sm">{bin.expression}</td>
-                      <td className="p-3 text-right font-mono text-gray-300">{bin.hits}</td>
-                      <td className="p-3 text-right">
-                        <span className={cn(
-                          "px-2 py-0.5 rounded text-xs font-medium",
-                          bin.covered ? "bg-green-900/30 text-green-300" : "bg-red-900/30 text-red-300"
-                        )}>
-                          {bin.covered ? "COVERED" : "NOT COVERED"}
-                        </span>
+                  {binsLoading ? (
+                    <tr>
+                      <td colSpan={4} className="p-6 text-center text-gray-500">
+                        Loading bin evidence...
                       </td>
                     </tr>
-                  ))}
+                  ) : bins.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="p-6 text-center text-amber-400/80">
+                        [UNKNOWN] No persisted bin evidence for this coverpoint. Run a coverage
+                        collection that records functional bins to populate this view.
+                      </td>
+                    </tr>
+                  ) : (
+                    bins.map((bin: any) => (
+                      <tr key={bin.name} className="border-b border-gray-800 hover:bg-gray-800/50">
+                        <td className="p-3 font-mono text-white">{bin.name}</td>
+                        <td className="p-3 text-gray-300 font-mono text-sm">{bin.expression}</td>
+                        <td className="p-3 text-right font-mono text-gray-300">
+                          {bin.hits ?? "UNKNOWN"}
+                        </td>
+                        <td className="p-3 text-right">
+                          <span className={cn(
+                            "px-2 py-0.5 rounded text-xs font-medium",
+                            bin.covered ? "bg-green-900/30 text-green-300" : "bg-red-900/30 text-red-300"
+                          )}>
+                            {bin.covered ? "COVERED" : "NOT COVERED"}
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -706,43 +688,13 @@ export function CoverageDashboard({ projectId, simulationId }: { projectId: stri
             </h2>
             <div className="space-y-2 max-h-96 overflow-auto">
               {dashboard.gaps.map((gap: any, i: number) => (
-                <div
-                  key={i}
-                  className="p-4 bg-gray-800/50 border border-gray-700 rounded-lg hover:border-red-500 transition-colors"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className={cn(
-                          "px-1.5 py-0.5 rounded text-xs font-mono",
-                          gap.gap_type === "reachable_untested" && "bg-red-900/30 text-red-300",
-                          gap.gap_type === "potentially_unreachable" && "bg-yellow-900/30 text-yellow-300",
-                          "bg-gray-700 text-gray-300"
-                        )}>
-                          {gap.gap_type.replace("_", " ")}
-                        </span>
-                        <span className="text-sm text-gray-400 font-mono">
-                          {gap.rtl_location?.module}:{gap.rtl_location?.line}
-                        </span>
-                      </div>
-                      <p className="text-sm text-gray-300 mb-2">{gap.description}</p>
-                      <div className="flex items-center gap-4 text-xs text-gray-500">
-                        <span>Impact: ~{gap.estimated_impact?.toFixed(1)}%</span>
-                        <span>Coverage: {formatCoverage(gap.coverage_before)}</span>
-                        <span className="font-mono">{gap.coverage_type}</span>
-                      </div>
-                    </div>
-                    <button className="px-3 py-1.5 text-sm bg-blue-900/30 text-blue-300 rounded hover:bg-blue-900/50 whitespace-nowrap">
-                      Generate Test
-                    </button>
-                  </div>
-                ))}
-              </div>
+                <GapRow key={i} gap={gap} compact />
+              ))}
             </div>
-          )}
+          </div>
+)}
         </div>
       </div>
-    </div>
   );
 }
 

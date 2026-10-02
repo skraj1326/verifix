@@ -1,13 +1,34 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { Suspense, useState, useEffect } from "react";
 import { CoverageDashboard } from "@/components/coverage/CoverageDashboard";
 import { FileCode, ChevronLeft, TrendingUp, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import { useRouter, useSearchParams } from "next/navigation";
 
+// useSearchParams() opts a route out of static prerendering unless it is read
+// inside a Suspense boundary, so the page wraps its content below.
 export default function CoverageDashboardPage() {
+  return (
+    <Suspense fallback={<PageFallback label="Loading coverage" />}>
+      <CoverageDashboardContent />
+    </Suspense>
+  );
+}
+
+function PageFallback({ label }: { label: string }) {
+  return (
+    <div className="min-h-screen bg-background flex items-center justify-center">
+      <div className="text-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto" />
+        <p className="mt-3 text-sm text-muted-foreground">{label}...</p>
+      </div>
+    </div>
+  );
+}
+
+function CoverageDashboardContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const projectId = searchParams.get("projectId");
@@ -82,7 +103,7 @@ export default function CoverageDashboardPage() {
       {/* Main Content */}
       <main className="flex-1 overflow-hidden">
         {selectedProject ? (
-          <CoverageDashboard projectId={selectedProject} simulationId={simulationId} />
+          <CoverageDashboard projectId={selectedProject} simulationId={simulationId ?? undefined} />
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-center p-8">
             <div className="w-16 h-16 text-gray-600 mb-4">
@@ -109,5 +130,3 @@ export default function CoverageDashboardPage() {
     </div>
   );
 }
-
-export default CoverageDashboardPage;

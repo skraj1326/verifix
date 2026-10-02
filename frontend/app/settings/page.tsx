@@ -66,11 +66,15 @@ export default function SettingsPage() {
   const [testing, setTesting] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, boolean>>({});
 
-  const handleChange = (section: string, field: string, value: any) => {
+  const handleChange = (
+    section: keyof typeof defaultSettings,
+    field: string,
+    value: any
+  ) => {
     setSettings(prev => ({
       ...prev,
       [section]: {
-        ...prev[section],
+        ...(prev[section] as Record<string, unknown>),
         [field]: value,
       },
     }));
@@ -144,23 +148,23 @@ export default function SettingsPage() {
               <SettingField
                 label="Application Name"
                 value={settings.app.name}
-                onChange={(v) => handleChange('app', 'name', v)}
+                onChange={(v: any) => handleChange('app', 'name', v)}
               />
               <SettingField
                 label="Version"
                 value={settings.app.version}
-                onChange={(v) => handleChange('app', 'version', v)}
+                onChange={(v: any) => handleChange('app', 'version', v)}
                 disabled
               />
               <SettingField
                 label="API Prefix"
                 value={settings.app.apiPrefix}
-                onChange={(v) => handleChange('app', 'apiPrefix', v)}
+                onChange={(v: any) => handleChange('app', 'apiPrefix', v)}
               />
               <SettingToggle
                 label="Debug Mode"
                 checked={settings.app.debug}
-                onChange={(v) => handleChange('app', 'debug', v)}
+                onChange={(v: any) => handleChange('app', 'debug', v)}
               />
             </SettingsSection>
 
@@ -169,14 +173,14 @@ export default function SettingsPage() {
               <SettingField
                 label="Database URL (Async)"
                 value={settings.database.url}
-                onChange={(v) => handleChange('database', 'url', v)}
+                onChange={(v: any) => handleChange('database', 'url', v)}
                 type="text"
                 description="SQLite: sqlite+aiosqlite:///./astrixcore.db | PostgreSQL: postgresql+asyncpg://user:pass@host:5432/db"
               />
               <SettingField
                 label="Database URL (Sync)"
                 value={settings.database.syncUrl}
-                onChange={(v) => handleChange('database', 'syncUrl', v)}
+                onChange={(v: any) => handleChange('database', 'syncUrl', v)}
                 type="text"
                 description="For migrations and workers"
               />
@@ -202,27 +206,27 @@ export default function SettingsPage() {
               <SettingField
                 label="Storage Root"
                 value={settings.storage.root}
-                onChange={(v) => handleChange('storage', 'root', v)}
+                onChange={(v: any) => handleChange('storage', 'root', v)}
               />
               <SettingField
                 label="RTL Storage"
                 value={settings.storage.rtl}
-                onChange={(v) => handleChange('storage', 'rtl', v)}
+                onChange={(v: any) => handleChange('storage', 'rtl', v)}
               />
               <SettingField
                 label="Test Storage"
                 value={settings.storage.tests}
-                onChange={(v) => handleChange('storage', 'tests', v)}
+                onChange={(v: any) => handleChange('storage', 'tests', v)}
               />
               <SettingField
                 label="Log Storage"
                 value={settings.storage.logs}
-                onChange={(v) => handleChange('storage', 'logs', v)}
+                onChange={(v: any) => handleChange('storage', 'logs', v)}
               />
               <SettingField
                 label="Coverage Storage"
                 value={settings.storage.coverage}
-                onChange={(v) => handleChange('storage', 'coverage', v)}
+                onChange={(v: any) => handleChange('storage', 'coverage', v)}
               />
             </SettingsSection>
 
@@ -231,7 +235,7 @@ export default function SettingsPage() {
               <SettingField
                 label="Verilator Path"
                 value={settings.simulation.verilatorPath}
-                onChange={(v) => handleChange('simulation', 'verilatorPath', v)}
+                onChange={(v: any) => handleChange('simulation', 'verilatorPath', v)}
                 description="Leave as 'verilator' if in PATH, or provide full path"
               />
               <div className="flex gap-2">
@@ -265,18 +269,18 @@ export default function SettingsPage() {
               <SettingField
                 label="Icarus Verilog Path"
                 value={settings.simulation.icarusPath}
-                onChange={(v) => handleChange('simulation', 'icarusPath', v)}
+                onChange={(v: any) => handleChange('simulation', 'icarusPath', v)}
               />
               <SettingField
                 label="Simulation Timeout (seconds)"
                 value={settings.simulation.timeout}
-                onChange={(v) => handleChange('simulation', 'timeout', Number(v))}
+                onChange={(v: any) => handleChange('simulation', 'timeout', Number(v))}
                 type="number"
               />
               <SettingField
                 label="Max Concurrent Simulations"
                 value={settings.simulation.maxConcurrent}
-                onChange={(v) => handleChange('simulation', 'maxConcurrent', Number(v))}
+                onChange={(v: any) => handleChange('simulation', 'maxConcurrent', Number(v))}
                 type="number"
               />
             </SettingsSection>
@@ -286,20 +290,20 @@ export default function SettingsPage() {
               <SettingField
                 label="Provider"
                 value={settings.ai.provider}
-                onChange={(v) => handleChange('ai', 'provider', v)}
+                onChange={(v: any) => handleChange('ai', 'provider', v)}
                 type="select"
                 options={['mock', 'openai']}
               />
               <SettingField
                 label="Model"
                 value={settings.ai.model}
-                onChange={(v) => handleChange('ai', 'model', v)}
+                onChange={(v: any) => handleChange('ai', 'model', v)}
                 description="e.g., gpt-4o, gpt-4-turbo, claude-3-opus"
               />
               <SettingField
                 label="API Key"
                 value={settings.ai.apiKey}
-                onChange={(v) => handleChange('ai', 'apiKey', v)}
+                onChange={(v: any) => handleChange('ai', 'apiKey', v)}
                 type="password"
                 description="Leave empty to use mock provider"
                 showCopy={true}
@@ -308,13 +312,13 @@ export default function SettingsPage() {
               <SettingField
                 label="Base URL (Optional)"
                 value={settings.ai.baseUrl}
-                onChange={(v) => handleChange('ai', 'baseUrl', v)}
+                onChange={(v: any) => handleChange('ai', 'baseUrl', v)}
                 description="For OpenAI-compatible APIs (e.g., Azure, local)"
               />
               <SettingField
                 label="Temperature"
                 value={settings.ai.temperature}
-                onChange={(v) => handleChange('ai', 'temperature', Number(v))}
+                onChange={(v: any) => handleChange('ai', 'temperature', Number(v))}
                 type="number"
                 step="0.1"
                 min="0"
@@ -323,18 +327,18 @@ export default function SettingsPage() {
               <SettingField
                 label="Max Tokens"
                 value={settings.ai.maxTokens}
-                onChange={(v) => handleChange('ai', 'maxTokens', Number(v))}
+                onChange={(v: any) => handleChange('ai', 'maxTokens', Number(v))}
                 type="number"
               />
               <SettingToggle
                 label="AI Enabled"
                 checked={settings.ai.enabled}
-                onChange={(v) => handleChange('ai', 'enabled', v)}
+                onChange={(v: any) => handleChange('ai', 'enabled', v)}
               />
               <SettingField
                 label="Confidence Threshold"
                 value={settings.ai.confidenceThreshold}
-                onChange={(v) => handleChange('ai', 'confidenceThreshold', Number(v))}
+                onChange={(v: any) => handleChange('ai', 'confidenceThreshold', Number(v))}
                 type="number"
                 step="0.1"
                 min="0"
@@ -343,7 +347,7 @@ export default function SettingsPage() {
               <SettingField
                 label="Max Retries"
                 value={settings.ai.maxRetries}
-                onChange={(v) => handleChange('ai', 'maxRetries', Number(v))}
+                onChange={(v: any) => handleChange('ai', 'maxRetries', Number(v))}
                 type="number"
               />
             </SettingsSection>
@@ -353,7 +357,7 @@ export default function SettingsPage() {
               <SettingField
                 label="Secret Key"
                 value={settings.security.secretKey}
-                onChange={(v) => handleChange('security', 'secretKey', v)}
+                onChange={(v: any) => handleChange('security', 'secretKey', v)}
                 type="password"
                 showCopy={true}
                 onCopy={() => copyToClipboard(settings.security.secretKey)}
@@ -362,7 +366,7 @@ export default function SettingsPage() {
               <SettingField
                 label="Encryption Key (Optional)"
                 value={settings.security.encryptionKey}
-                onChange={(v) => handleChange('security', 'encryptionKey', v)}
+                onChange={(v: any) => handleChange('security', 'encryptionKey', v)}
                 type="password"
                 showCopy={true}
                 onCopy={() => copyToClipboard(settings.security.encryptionKey)}
@@ -370,7 +374,7 @@ export default function SettingsPage() {
               <SettingToggle
                 label="Audit Logging Enabled"
                 checked={settings.security.auditLogEnabled}
-                onChange={(v) => handleChange('security', 'auditLogEnabled', v)}
+                onChange={(v: any) => handleChange('security', 'auditLogEnabled', v)}
               />
               <div className="space-y-2">
                 <label className="text-sm text-muted-foreground">CORS Origins</label>

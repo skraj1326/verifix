@@ -23,6 +23,7 @@ from app.api.v1 import (
     rtl_hierarchy,
     coverage_dashboard,
     reports,
+    waveform,
 )
 
 logging.basicConfig(
@@ -81,6 +82,7 @@ app.include_router(simulation.router, prefix=API_PREFIX, tags=["Simulation"])
 app.include_router(coverage.router, prefix=API_PREFIX, tags=["Coverage"])
 app.include_router(coverage_dashboard.router, prefix=API_PREFIX, tags=["Coverage Dashboard"])
 app.include_router(reports.router, prefix=API_PREFIX, tags=["Reports"])
+app.include_router(waveform.router, prefix=API_PREFIX, tags=["Waveform"])
 app.include_router(analysis.router, prefix=API_PREFIX, tags=["Analysis"])
 app.include_router(ai_agents.router, prefix=API_PREFIX, tags=["AI Agents"])
 app.include_router(spec_analysis.router, prefix=API_PREFIX, tags=["Specification"])
@@ -153,6 +155,7 @@ async def root():
                 "coverage": f"{API_PREFIX}/coverage/analyze",
                 "coverage_dashboard": f"{API_PREFIX}/coverage/dashboard",
                 "reports": f"{API_PREFIX}/reports",
+                "waveform": f"{API_PREFIX}/waveform",
                 "failure_analysis": f"{API_PREFIX}/failure-analysis",
                 "spec_analysis": f"{API_PREFIX}/spec/analyze",
                 "websocket": "/ws",

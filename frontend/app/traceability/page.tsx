@@ -18,62 +18,60 @@ import {
   Database,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { traceabilityApi } from '@/lib/api';
+import { specApi } from '@/lib/api';
 
-const mockTraceability = {
-  requirements: [
-    {
-      requirement_id: 'REQ-001',
-      description: 'FIFO shall not accept writes when full',
-      verification_plans: ['VP-fifo_sync-FIFO-001'],
-      assertions: ['fifo_sync_no_write_when_full', 'fifo_sync_no_write_when_full'],
-      tests: ['tb_fifo_sync_fifo', 'tb_fifo_sync_basic'],
-      simulations: ['sim_001', 'sim_002'],
-      failures: [],
-      coverage: ['cov_001'],
-    },
-    {
-      requirement_id: 'REQ-002',
-      description: 'FIFO shall not allow reads when empty',
-      verification_plans: ['VP-fifo_sync-FIFO-001'],
-      assertions: ['fifo_sync_no_read_when_empty'],
-      tests: ['tb_fifo_sync_fifo'],
-      simulations: ['sim_001'],
-      failures: [],
-      coverage: ['cov_001'],
-    },
-    {
-      requirement_id: 'REQ-003',
-      description: 'FIFO pointers shall increment correctly',
-      verification_plans: ['VP-fifo_sync-FIFO-002', 'VP-fifo_sync-FIFO-003'],
-      assertions: ['fifo_sync_wr_ptr_progress', 'fifo_sync_rd_ptr_progress', 'fifo_sync_count_tracking'],
-      tests: ['tb_fifo_sync_fifo', 'tb_fifo_sync_basic'],
-      simulations: ['sim_001', 'sim_002'],
-      failures: [],
-      coverage: ['cov_001', 'cov_002'],
-    },
-    {
-      requirement_id: 'REQ-004',
-      description: 'FIFO full and empty flags shall be mutually exclusive',
-      verification_plans: ['VP-fifo_sync-FIFO-004'],
-      assertions: ['fifo_sync_full_empty_mutex'],
-      tests: ['tb_fifo_sync_fifo'],
-      simulations: ['sim_001'],
-      failures: [],
-      coverage: ['cov_001'],
-    },
-    {
-      requirement_id: 'REQ-005',
-      description: 'Reset shall clear all registers and pointers',
-      verification_plans: ['VP-fifo_sync-RST-001'],
-      assertions: ['fifo_sync_reset_clears_registers'],
-      tests: ['tb_fifo_sync_reset'],
-      simulations: ['sim_001'],
-      failures: [],
-      coverage: ['cov_001'],
-    },
-  ],
-};
+const defaultSpec = `# Verification Requirements
+
+## REQ-001
+FIFO shall not accept writes when full.
+
+## REQ-002
+FIFO shall not allow reads when empty.
+
+## REQ-003
+FIFO pointers shall increment correctly.
+`;
+
+/**
+ * Requirements returned by POST /api/v1/spec/analyze have the shape
+ * { id, category, title, description, priority, source }.
+ *
+ * There is no backend endpoint that persists requirement -> artifact links
+ * (plans, assertions, tests, simulations, failures, coverage), so those link
+ * collections are always empty here and render as UNKNOWN. They are never
+ * populated with invented identifiers.
+ */
+interface TraceabilityRequirement {
+  id: string;
+  category: string;
+  title: string;
+  description: string;
+  priority: string;
+  source: string;
+  verification_plans: string[];
+  assertions: string[];
+  tests: string[];
+  simulations: string[];
+  failures: string[];
+  coverage: string[];
+}
+
+function normalizeRequirement(raw: any): TraceabilityRequirement {
+  return {
+    id: raw?.id ?? "UNKNOWN",
+    category: raw?.category ?? "UNKNOWN",
+    title: raw?.title ?? "UNKNOWN",
+    description: raw?.description ?? raw?.title ?? "UNKNOWN",
+    priority: raw?.priority ?? "UNKNOWN",
+    source: raw?.source ?? "UNKNOWN",
+    verification_plans: [],
+    assertions: [],
+    tests: [],
+    simulations: [],
+    failures: [],
+    coverage: [],
+  };
+}
 
 const artifactIcons = {
   verification_plans: FileText,
@@ -85,23 +83,53 @@ const artifactIcons = {
 };
 
 export default function TraceabilityPage() {
-  const [requirements, setRequirements] = useState(mockTraceability.requirements);
+  const [specText, setSpecText] = useState(defaultSpec);
+  const [requirements, setRequirements] = useState<TraceabilityRequirement[]>([]);
   const [filter, setFilter] = useState('');
   const [selectedReq, setSelectedReq] = useState<any>(null);
   const [viewMode, setViewMode] = useState<'table' | 'matrix'>('table');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [analyzedFilename, setAnalyzedFilename] = useState<string | null>(null);
 
-  const filteredReqs = requirements.filter(req => 
-    req.requirement_id.toLowerCase().includes(filter.toLowerCase()) ||
-    req.description.toLowerCase().includes(filter.toLowerCase())
+  const handleAnalyze = async () => {
+    if (!specText.trim()) {
+      setError('No specification text to analyze');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await specApi.analyze(specText, 'requirements.md', 'markdown');
+      const list: any[] = Array.isArray(result?.requirements) ? result.requirements : [];
+      setRequirements(list.map(normalizeRequirement));
+      setAnalyzedFilename(result?.filename ?? 'requirements.md');
+      setSelectedReq(null);
+    } catch (err: any) {
+      setError(err?.message ?? 'Spec analysis failed');
+      setRequirements([]);
+      setAnalyzedFilename(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const filteredReqs = requirements.filter(req =>
+    (req.id ?? '').toLowerCase().includes(filter.toLowerCase()) ||
+    (req.title ?? '').toLowerCase().includes(filter.toLowerCase()) ||
+    (req.description ?? '').toLowerCase().includes(filter.toLowerCase())
   );
 
-  const getStatus = (req: any) => {
-    const hasPlan = req.verification_plans.length > 0;
-    const hasAssertions = req.assertions.length > 0;
-    const hasTests = req.tests.length > 0;
-    const hasSims = req.simulations.length > 0;
-    const hasCoverage = req.coverage.length > 0;
-    return { hasPlan, hasAssertions, hasTests, hasSims, hasCoverage };
+  const getStatus = (req: TraceabilityRequirement) => {
+    // No persisted requirement -> artifact links exist in the backend, so
+    // every link column is reported as unrecorded rather than assumed.
+    return {
+      hasPlan: req.verification_plans.length > 0,
+      hasAssertions: req.assertions.length > 0,
+      hasTests: req.tests.length > 0,
+      hasSims: req.simulations.length > 0,
+      hasCoverage: req.coverage.length > 0,
+    };
   };
 
   return (
@@ -119,6 +147,50 @@ export default function TraceabilityPage() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-6">
+        <div className="mb-6 border border-border rounded-lg bg-card/50 p-4">
+          <label className="block text-sm font-medium mb-2" htmlFor="spec-input">
+            Specification document
+          </label>
+          <textarea
+            id="spec-input"
+            value={specText}
+            onChange={(e) => setSpecText(e.target.value)}
+            rows={6}
+            className="w-full px-3 py-2 bg-secondary border border-border rounded-lg font-mono text-sm"
+            placeholder="Paste requirements here (markdown or plain text)..."
+          />
+          <div className="flex items-center gap-3 mt-3">
+            <button
+              onClick={handleAnalyze}
+              disabled={loading}
+              className="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50"
+            >
+              {loading ? 'Analyzing...' : 'Analyze specification'}
+            </button>
+            {analyzedFilename && (
+              <span className="text-sm text-muted-foreground">
+                Parsed {requirements.length} requirement(s) from {analyzedFilename}
+              </span>
+            )}
+            {error && <span className="text-sm text-red-500">{error}</span>}
+          </div>
+          <p className="mt-3 text-xs text-muted-foreground">
+            [UNKNOWN] Requirement to artifact links (plans, assertions, tests, simulations,
+            coverage) are not persisted by the backend, so those columns stay UNKNOWN until a
+            traceability persistence layer exists. Nothing here is inferred or generated.
+          </p>
+        </div>
+
+        {requirements.length === 0 ? (
+          <div className="border border-border rounded-lg bg-card/50 p-8 text-center">
+            <Database className="w-8 h-8 text-muted-foreground mx-auto mb-3" />
+            <h2 className="text-lg font-semibold mb-1">No requirements recorded</h2>
+            <p className="text-sm text-muted-foreground">
+              Analyze a specification above to load real requirements. No sample data is displayed.
+            </p>
+          </div>
+        ) : (
+          <>
         <div className="mb-6 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <input
@@ -167,8 +239,8 @@ export default function TraceabilityPage() {
                     const status = getStatus(req);
                     const complete = status.hasPlan && status.hasAssertions && status.hasTests && status.hasSims && status.hasCoverage;
                     return (
-                      <tr key={req.requirement_id} className="hover:bg-secondary/50 cursor-pointer" onClick={() => setSelectedReq(req)}>
-                        <td className="px-4 py-3 font-mono text-sm font-medium">{req.requirement_id}</td>
+                      <tr key={req.id} className="hover:bg-secondary/50 cursor-pointer" onClick={() => setSelectedReq(req)}>
+                        <td className="px-4 py-3 font-mono text-sm font-medium">{req.id}</td>
                         <td className="px-4 py-3 text-sm max-w-xs truncate">{req.description}</td>
                         <td className="px-4 py-3">
                           <span className={cn('px-2 py-0.5 text-xs rounded', status.hasPlan ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400')}>
@@ -220,8 +292,8 @@ export default function TraceabilityPage() {
                       Artifact Type
                     </th>
                     {filteredReqs.map((req) => (
-                      <th key={req.requirement_id} className="px-4 py-3 text-center text-xs font-medium text-muted-foreground w-36">
-                        {req.requirement_id}
+                      <th key={req.id} className="px-4 py-3 text-center text-xs font-medium text-muted-foreground w-36">
+                        {req.id}
                       </th>
                     ))}
                   </tr>
@@ -239,14 +311,21 @@ export default function TraceabilityPage() {
                         const items = req[type as keyof typeof req] as string[];
                         const hasItems = items.length > 0;
                         return (
-                          <td key={req.requirement_id} className="px-4 py-3 text-center">
+                          <td key={req.id} className="px-4 py-3 text-center">
                             {hasItems ? (
                               <span className="px-2 py-0.5 text-xs bg-green-500/20 text-green-400 rounded font-medium">
                                 {items.length}
                               </span>
                             ) : (
-                              <span className="px-2 py-0.5 text-xs bg-red-500/20 text-red-400 rounded">
-                                —
+                              // The backend does not persist requirement ->
+                              // artifact links, so an empty cell means "not
+                              // recorded", never "failed". Render it as an
+                              // explicit UNKNOWN badge instead of a red dash.
+                              <span
+                                title="No persisted links to recorded artifacts (UNKNOWN)"
+                                className="px-2 py-0.5 text-xs bg-amber-500/20 text-amber-300 rounded font-medium"
+                              >
+                                UNKNOWN
                               </span>
                             )}
                           </td>
@@ -267,7 +346,7 @@ export default function TraceabilityPage() {
               <div className="border-b border-border px-6 py-4 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <GitBranch className="w-5 h-5" />
-                  <span className="font-medium">{selectedReq.requirement_id}</span>
+                  <span className="font-medium">{selectedReq.id}</span>
                 </div>
                 <button onClick={() => setSelectedReq(null)} className="text-muted-foreground hover:text-foreground">
                   ✕
@@ -276,15 +355,28 @@ export default function TraceabilityPage() {
               <div className="p-6 space-y-6">
                 <p className="text-muted-foreground">{selectedReq.description}</p>
                 
-                {Object.entries(selectedReq).filter(([k]) => k !== 'requirement_id' && k !== 'description').map(([type, items]) => (
+                {Object.entries(selectedReq).filter(([k]) => !['id', 'title', 'description', 'category', 'priority', 'source'].includes(k)).map(([type, items]) => (
                   <div key={type} className="bg-secondary/50 rounded-lg p-4">
                     <div className="flex items-center gap-2 mb-3">
-                      <artifactIcons[type as keyof typeof artifactIcons] className="w-4 h-4 text-primary" />
+                      {(() => {
+                        const Icon = artifactIcons[type as keyof typeof artifactIcons];
+                        return Icon ? <Icon className="w-4 h-4 text-primary" /> : null;
+                      })()}
                       <span className="font-medium capitalize">{type.replace('_', ' ')}</span>
-                      <span className="px-2 py-0.5 text-xs bg-primary/20 text-primary rounded">
-                        {(items as string[]).length}
-                      </span>
+                      {(items as string[]).length > 0 ? (
+                        <span className="px-2 py-0.5 text-xs bg-primary/20 text-primary rounded">
+                          {(items as string[]).length}
+                        </span>
+                      ) : (
+                        <span
+                          title="No persisted links to recorded artifacts (UNKNOWN)"
+                          className="px-2 py-0.5 text-xs bg-amber-500/20 text-amber-300 rounded font-medium"
+                        >
+                          UNKNOWN
+                        </span>
+                      )}
                     </div>
+                    {(items as string[]).length > 0 ? (
                     <div className="flex flex-wrap gap-1">
                       {(items as string[]).map((item: string) => (
                         <span key={item} className="px-2 py-0.5 text-xs bg-secondary border border-border rounded font-mono">
@@ -292,11 +384,19 @@ export default function TraceabilityPage() {
                         </span>
                       ))}
                     </div>
+                    ) : (
+                      <p className="text-xs text-amber-300/90">
+                        Not recorded by the backend. Absence of a link is not evidence that
+                        verification did not happen.
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>
             </div>
           </div>
+        )}
+          </>
         )}
       </main>
     </div>

@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { cn, truncate, getConfidenceColor } from '@/lib/utils';
 import { verificationApi } from '@/lib/api';
+import toast from "react-hot-toast";
 
 const defaultRtl = `module fifo_sync #(
     parameter int DEPTH = 16,
@@ -72,15 +73,14 @@ export default function TestsPage() {
   };
 
   const handleGenerateUvm = async () => {
-    setLoading(true);
-    try {
-      const result = await verificationApi.generateUvm(rtlContent);
-      setTests(prev => [...prev, ...(result.uvm_components || [])]);
-    } catch (error) {
-      console.error('UVM generation failed:', error);
-    } finally {
-      setLoading(false);
-    }
+    // There is no UVM generation endpoint in the backend (see the OpenAPI
+    // schema: /api/v1/verification exposes assertions, plan, tests and
+    // full-flow only). Rather than calling an endpoint that does not exist or
+    // inventing UVM components, report the capability as unavailable.
+    toast.error(
+      'UVM generation is not implemented by the backend. ' +
+      'POST /api/v1/verification/uvm does not exist, so no UVM components can be produced.'
+    );
   };
 
   const filteredTests = tests.filter((t: any) => {
@@ -94,7 +94,7 @@ export default function TestsPage() {
     return true;
   });
 
-  const testTypes = [...new Set(tests.map(t => t.test_type))];
+  const testTypes = Array.from(new Set<string>(tests.map(t => t.test_type)));
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);

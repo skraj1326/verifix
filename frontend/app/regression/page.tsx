@@ -71,12 +71,21 @@ export default function RegressionPage() {
   const handleRun = async () => {
     setLoading(true);
     try {
+      // POST /regression/analyze takes `results: list[dict]`, where each entry
+      // is a recorded TestResult (name/status/runtime_seconds/coverage_delta/
+      // bugs_found/is_flaky/affected_modules).
+      //
+      // No simulations have actually been executed for the selected files, so
+      // we send only the test names with status "unknown" rather than
+      // inventing pass/fail, runtime or coverage numbers. The engine defaults
+      // the remaining fields; any ranking it returns is therefore based on
+      // unrecorded results and must be read as UNKNOWN.
       const res = await regressionApi.run({
-        rtl_files: [rtlContent],
-        test_files: selectedTests,
-        top_module: topModule,
-        simulator,
-        timeout,
+        results: selectedTests.map((name) => ({
+          name,
+          status: "unknown",
+          affected_modules: [],
+        })),
       });
       setResult(res);
       setHistory(prev => [res, ...prev].slice(0, 10));

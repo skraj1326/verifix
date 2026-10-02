@@ -12,6 +12,7 @@ import {
   RotateCcw,
   Download,
   ChevronLeft,
+  FileText,
   ChevronRight,
 } from 'lucide-react';
 import { cn, formatDuration } from '@/lib/utils';
@@ -101,9 +102,9 @@ export default function SimulationPage() {
         timeout,
       });
       setResult(res);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Simulation failed:', error);
-      setResult({ error: error.message, status: 'ERROR' });
+      setResult({ error: error?.message ?? 'UNKNOWN', status: 'ERROR' });
     } finally {
       setLoading(false);
     }
@@ -120,9 +121,9 @@ export default function SimulationPage() {
         timeout,
       });
       setResult({ compilation: res, status: res.success ? 'COMPILED' : 'COMPILE_FAILED' });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Compilation failed:', error);
-      setResult({ error: error.message, status: 'ERROR' });
+      setResult({ error: error?.message ?? 'UNKNOWN', status: 'ERROR' });
     } finally {
       setLoading(false);
     }

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { Suspense, useState, useEffect } from "react";
 import { RTLHierarchyBrowser } from "@/components/diagram/RTLHierarchyBrowser";
 import { FileCode, ChevronLeft, RotateCcw, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -8,6 +8,20 @@ import { api } from "@/lib/api";
 import { useRouter, useSearchParams } from "next/navigation";
 
 export default function RTLHierarchyPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-screen items-center justify-center text-slate-400">
+          Loading hierarchy...
+        </div>
+      }
+    >
+      <RTLHierarchyView />
+    </Suspense>
+  );
+}
+
+function RTLHierarchyView() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const designId = searchParams.get("designId");
@@ -132,5 +146,3 @@ export default function RTLHierarchyPage() {
     </div>
   );
 }
-
-export default RTLHierarchyPage;

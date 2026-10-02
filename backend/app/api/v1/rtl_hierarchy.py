@@ -1,11 +1,11 @@
 """RTL Hierarchy Browser API endpoints."""
 
+from typing import Any, Dict, List, Optional
+
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
 
 from app.engines.rtl_parser.parser import RTLParser
-from app.engines.knowledge_graph.builder import KnowledgeGraphBuilder
 
 router = APIRouter(prefix="/rtl", tags=["RTL Hierarchy"])
 
@@ -14,11 +14,11 @@ class HierarchyNode(BaseModel):
     id: str
     name: str
     type: str
-    children: List["HierarchyNode"] = []
-    ports: List[Dict[str, Any]] = []
-    signals: List[Dict[str, Any]] = []
-    instances: List[Dict[str, Any]] = []
-    metadata: Dict[str, Any] = {}
+    children: List["HierarchyNode"] = Field(default_factory=list)
+    ports: List[Dict[str, Any]] = Field(default_factory=list)
+    signals: List[Dict[str, Any]] = Field(default_factory=list)
+    instances: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class HierarchyResponse(BaseModel):
@@ -40,86 +40,123 @@ async def get_hierarchy(design_id: str):
         result = await db.execute(select(Design).where(Design.id == design_id))
         design = result.scalar_one_or_none()
 
-    if not design:
-        raise HTTPException(status_code=404, detail="Design not found")
+        if not design:
+            raise HTTPException(
+                status_code=404,
+                detail="Design not found. Analyze the RTL with a project_id to persist it first.",
+            )
+        design_name = design.name
+        raw_content = design.raw_content
 
-    # Parse RTL if not already parsed
+    if not raw_content:
+        raise HTTPException(status_code=400, detail="Design has no stored RTL content")
+
+    # Parse RTL from the persisted content.
     parser = RTLParser()
-    modules = parser.parse(design.raw_content, design.name)
+    modules = parser.parse(raw_content, design_name)
 
     if not modules:
         raise HTTPException(status_code=400, detail="No modules found in RTL")
 
-    # Build knowledge graph
-    kg_builder = KnowledgeGraphBuilder()
-    graph = kg_builder.build(modules)
+    by_name: Dict[str, Any] = {}
+    for module in modules:
+        by_name.setdefault(module.name, module)
 
-    # Build hierarchy tree
-    def build_node(module) -> HierarchyNode:
+    def build_node(module, seen: frozenset) -> HierarchyNode:
+        """Recursively build a node, guarding against instantiation cycles."""
+        children: List[HierarchyNode] = []
+        for inst in module.instances:
+            child = by_name.get(inst.module_name)
+            # Skip self-references and already-visited modules (recursive RTL).
+            if child is None or child.name in seen:
+                continue
+            children.append(build_node(child, seen | {child.name}))
+
         return HierarchyNode(
             id=f"mod_{module.name}",
             name=module.name,
             type=module.module_type.value,
-            children=[build_node(inst) for inst in module.instances if any(m.name == inst.module_name for m in modules)],
-            ports=[{
-                "name": p.name,
-                "direction": p.direction.value,
-                "width": p.width,
-                "line": p.line
-            } for p in module.ports],
-            signals=[{
-                "name": s.name,
-                "type": s.signal_type.value,
-                "width": s.width,
-                "line": s.line
-            } for s in module.signals],
-            instances=[{
-                "name": inst.instance_name,
-                "module": inst.module_name,
-                "line": inst.line
-            } for inst in module.instances],
-            metadata=module.metadata
+            children=children,
+            ports=[
+                {
+                    "name": p.name,
+                    "direction": p.direction.value,
+                    "width": p.width,
+                    "line": p.line,
+                }
+                for p in module.ports
+            ],
+            signals=[
+                {
+                    "name": s.name,
+                    "type": s.signal_type.value,
+                    "width": s.width,
+                    "line": s.line,
+                }
+                for s in module.signals
+            ],
+            instances=[
+                {
+                    "name": inst.instance_name,
+                    "module": inst.module_name,
+                    "line": inst.line,
+                }
+                for inst in module.instances
+            ],
+            metadata=module.metadata if isinstance(module.metadata, dict) else {},
         )
 
-    # Build diagram data
-    mermaid = generate_mermaid_diagram(modules)
-    graphviz = generate_graphviz_diagram(modules)
+    # A top module is one that nothing else instantiates (or is flagged top).
+    instantiated = {inst.module_name for m in modules for inst in m.instances}
+    tops = [m for m in modules if m.is_top or m.name not in instantiated]
+    if not tops:
+        tops = list(modules)
 
-    hierarchy = [build_node(m) for m in modules if m.is_top or not any(inst.module_name == m.name for m in modules for inst in m.instances)]
+    hierarchy = [build_node(m, frozenset({m.name})) for m in tops]
 
     return HierarchyResponse(
         modules=hierarchy,
         diagram={
-            "mermaid": mermaid,
-            "graphviz": graphviz,
-            "hierarchy": [m.name for m in modules]
-        }
+            "mermaid": generate_mermaid_diagram(modules),
+            "graphviz": generate_graphviz_diagram(modules),
+            "hierarchy": [m.name for m in modules],
+        },
     )
+
+
+def _safe_id(name: str) -> str:
+    """Create a Mermaid-safe identifier from a module name."""
+    return "".join(ch if ch.isalnum() else "_" for ch in name)
 
 
 def generate_mermaid_diagram(modules) -> str:
     """Generate Mermaid diagram for module hierarchy."""
+    module_ids = {m.name: f"M{_safe_id(m.name)}" for m in modules}
+    unique_ids = {}
+    used = set()
+    for name, mid in module_ids.items():
+        candidate, counter = mid, 1
+        while candidate in used:
+            counter += 1
+            candidate = f"{mid}_{counter}"
+        used.add(candidate)
+        unique_ids[name] = candidate
+
     lines = ["graph TD"]
-    lines.append("  style A fill:#1e3a8a,stroke:#3b82f6,stroke-width:2px,color:#fff")
-    lines.append("  style B fill:#1e3a8a,stroke:#3b82f6,stroke-width:2px,color:#fff")
-    lines.append("  style C fill:#1e3a8a,stroke:#3b82f6,stroke-width:2px,color:#fff")
-
-    node_id = 0
-    module_ids = {}
-
     for module in modules:
-        mid = f"M{node_id}"
-        module_ids[module.name] = mid
-        node_id += 1
+        mid = unique_ids[module.name]
         shape = "[" if module.module_type.value == "module" else "(("
         close = "]" if module.module_type.value == "module" else "))"
-        lines.append(f"  {mid}{shape}{module.name}{close}")
+        lines.append(f'  {mid}{shape}"{module.name}"{close}')
+        lines.append(
+            f"  style {mid} fill:#1e3a8a,stroke:#3b82f6,stroke-width:2px,color:#fff"
+        )
 
     for module in modules:
-        mid = module_ids[module.name]
         for inst in module.instances:
-            if inst.module_name in module_ids:
-                lines.append(f"  {mid} --> {module_ids[inst.module_name]}")
+            target = unique_ids.get(inst.module_name)
+            if target:
+                lines.append(f'  {unique_ids[module.name]} -->|"{inst.instance_name}"| {target}')
 
     return "\n".join(lines)
 
