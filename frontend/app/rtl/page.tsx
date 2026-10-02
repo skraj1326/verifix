@@ -1,8 +1,6 @@
-"use client";
-
 import React, { useState, useEffect } from "react";
 import { MonacoEditor } from "@/components/editor/MonacoEditor";
-import { FileText, Play, Download, Upload, Search, ChevronDown, Save, Loader2 } from "lucide-react";
+import { FileText, Play, Download, Upload, Search, ChevronDown, Save, Loader2, GitBranch, Code2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import { useRouter } from "next/navigation";
@@ -144,7 +142,8 @@ export default function RTLEditorPage() {
   const [filename, setFilename] = useState("fifo_sync.sv");
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState<"editor" | "analysis" | "files">("editor");
+  const [activeTab, setActiveTab] = useState<"editor" | "analysis" | "hierarchy" | "files">("editor");
+  const [designId, setDesignId] = useState<string | null>(null);
   const [files, setFiles] = useState<{name: string, content: string}[]>([
     { name: "fifo_sync.sv", content: FIFO_EXAMPLE },
   ]);
@@ -162,6 +161,11 @@ export default function RTLEditorPage() {
         filename,
       });
       setAnalysisResult(response.data);
+      // Extract design ID from the first module if available
+      if (response.data.modules && response.data.modules.length > 0) {
+        // Use a generated design ID based on filename and timestamp
+        setDesignId(`design_${Date.now()}`);
+      }
       setActiveTab("analysis");
       toast.success("RTL analysis complete");
     } catch (error: any) {
@@ -312,6 +316,7 @@ export default function RTLEditorPage() {
         {[
           { id: "editor", label: "Editor", icon: FileText },
           { id: "analysis", label: "Analysis", icon: Search },
+          { id: "hierarchy", label: "Hierarchy", icon: GitBranch },
           { id: "files", label: "Files", icon: FileText },
         ].map((tab) => (
           <button
@@ -439,6 +444,18 @@ export default function RTLEditorPage() {
         {activeTab === "analysis" && !analysisResult && (
           <div className="h-full flex items-center justify-center text-gray-500">
             Click "Analyze" to see RTL analysis results
+          </div>
+        )}
+
+        {activeTab === "hierarchy" && (
+          <div className="h-full p-4">
+            <div className="h-full">
+              <iframe
+                src={`/rtl/hierarchy?designId=${designId}`}
+                className="w-full h-full border-0"
+                title="RTL Hierarchy Browser"
+              />
+            </div>
           </div>
         )}
 

@@ -20,6 +20,7 @@ from app.api.v1 import (
     analysis,
     ai_agents,
     spec_analysis,
+    rtl_hierarchy,
 )
 
 logging.basicConfig(
@@ -72,6 +73,7 @@ app.add_middleware(
 API_PREFIX = settings.API_PREFIX
 app.include_router(projects.router, prefix=API_PREFIX, tags=["Projects"])
 app.include_router(rtl_analysis.router, prefix=API_PREFIX, tags=["RTL Analysis"])
+app.include_router(rtl_hierarchy.router, prefix=API_PREFIX, tags=["RTL Hierarchy"])
 app.include_router(verification.router, prefix=API_PREFIX, tags=["Verification"])
 app.include_router(simulation.router, prefix=API_PREFIX, tags=["Simulation"])
 app.include_router(coverage.router, prefix=API_PREFIX, tags=["Coverage"])

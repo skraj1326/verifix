@@ -194,6 +194,15 @@ class ApiClient {
   async assessReachability(gapInfo: any, rtlContent: string) {
     return this.post("/ai/assess-reachability", { gap_info: gapInfo, rtl_content: rtlContent });
   }
+
+  // RTL Hierarchy
+  async getHierarchy(designId: string) {
+    return this.get(`/rtl/hierarchy/${designId}`);
+  }
+
+  async generateDiagram(designId: string, format: string = "mermaid") {
+    return this.post("/rtl/diagram", { design_id: designId, format });
+  }
 }
 
 export const api = new ApiClient();
