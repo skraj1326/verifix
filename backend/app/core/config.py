@@ -2,8 +2,9 @@
 
 from pathlib import Path
 from typing import Optional
+
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 
 
 class Settings(BaseSettings):
@@ -23,6 +24,18 @@ class Settings(BaseSettings):
     DATABASE_SYNC_URL: str = Field(
         default="postgresql://astrixcore:astrixcore@localhost:5432/astrixcore"
     )
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def convert_database_url(cls, value):
+        """Convert Render's PostgreSQL URL to asyncpg format."""
+        if isinstance(value, str) and value.startswith("postgresql://"):
+            return value.replace(
+                "postgresql://",
+                "postgresql+asyncpg://",
+                1
+            )
+        return value
 
     # Redis
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
@@ -56,11 +69,17 @@ class Settings(BaseSettings):
     # Security
     ENCRYPTION_KEY: Optional[str] = Field(default=None)
     AUDIT_LOG_ENABLED: bool = Field(default=True)
-    CORS_ORIGINS: list[str] = Field(default=["http://localhost:3000"])
+    CORS_ORIGINS: list[str] = Field(
+        default=["http://localhost:3000"]
+    )
 
     # Celery
-    CELERY_BROKER_URL: str = Field(default="redis://localhost:6379/1")
-    CELERY_RESULT_BACKEND: str = Field(default="redis://localhost:6379/2")
+    CELERY_BROKER_URL: str = Field(
+        default="redis://localhost:6379/1"
+    )
+    CELERY_RESULT_BACKEND: str = Field(
+        default="redis://localhost:6379/2"
+    )
 
     class Config:
         env_file = ".env"
@@ -68,8 +87,13 @@ class Settings(BaseSettings):
 
     def ensure_storage_dirs(self) -> None:
         """Create storage directories if they don't exist."""
-        for path in [self.STORAGE_ROOT, self.RTL_STORAGE, self.TEST_STORAGE,
-                      self.LOG_STORAGE, self.COVERAGE_STORAGE]:
+        for path in [
+            self.STORAGE_ROOT,
+            self.RTL_STORAGE,
+            self.TEST_STORAGE,
+            self.LOG_STORAGE,
+            self.COVERAGE_STORAGE,
+        ]:
             path.mkdir(parents=True, exist_ok=True)
 
 
