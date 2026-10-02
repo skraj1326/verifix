@@ -36,7 +36,19 @@ class ApiClient {
           if (typeof window !== "undefined") {
             localStorage.removeItem("auth_token");
             window.location.href = "/login";
-          }
+// Reports
+  async generateReport(projectId: string, data: { format?: string; include_sections?: string[]; template?: string; simulation_id?: string }) {
+    return this.post("/reports/generate", { project_id: projectId, ...data });
+  }
+
+  async getReport(reportId: string) {
+    return this.get(`/reports/${reportId}`);
+  }
+
+  async exportReport(reportId: string, format: string = "html") {
+    return this.post(`/reports/export/${reportId}`, { format });
+  }
+}
         }
         return Promise.reject(error);
       }
