@@ -67,7 +67,7 @@ app.add_middleware(
 # Trusted hosts (security)
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["*"] if settings.DEBUG else ["localhost", "127.0.0.1"],
+    allowed_hosts=["*"],
 )
 
 # Routes
