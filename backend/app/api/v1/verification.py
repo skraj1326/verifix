@@ -8,6 +8,7 @@ from app.engines.rtl_parser.parser import RTLParser
 from app.engines.verification_planner.planner import VerificationPlanGenerator
 from app.engines.assertion_generator.generator import AssertionGenerator
 from app.engines.test_generator.generator import TestGenerator
+from app.engines.uvm_generator.generator import UVMGenerator
 
 router = APIRouter(prefix="/verification")
 
@@ -25,6 +26,36 @@ class TestGenRequest(BaseModel):
     rtl_content: str
     coverage_gaps: Optional[list[dict]] = None
     test_types: list[str] = ["directed", "constrained_random"]
+
+
+class UVMGenRequest(BaseModel):
+    rtl_content: str
+    include_tests: bool = True
+
+
+@router.post("/uvm")
+async def generate_uvm(request: UVMGenRequest):
+    """Generate complete UVM environment from RTL."""
+    parser = RTLParser()
+    modules = parser.parse(request.rtl_content)
+
+    if not modules:
+        raise HTTPException(status_code=400, detail="No modules found in RTL")
+
+    generator = UVMGenerator()
+    uvm_components = generator.generate(modules)
+
+    component_types = {}
+    for comp in uvm_components:
+        ct = comp["component_type"]
+        component_types[ct] = component_types.get(ct, 0) + 1
+
+    return {
+        "uvm_components": uvm_components,
+        "total_components": len(uvm_components),
+        "component_types": component_types,
+        "modules_analyzed": [m.name for m in modules],
+    }
 
 
 @router.post("/plan")

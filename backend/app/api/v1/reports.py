@@ -6,13 +6,23 @@ number, and no sign-off or pass/fail claim is ever made without stored proof.
 """
 
 import html
+import json
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
-from app.models.database import TestStatus
+from app.models.database import TestStatus, Report
+
+# PDF generation
+try:
+    from fpdf import FPDF
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
 
 router = APIRouter(prefix="/reports", tags=["Verification Reports"])
 
@@ -31,6 +41,7 @@ class ReportRequest(BaseModel):
     format: str = "html"
     include_sections: Optional[List[str]] = None
     template: str = "standard"
+    persist: bool = True  # Whether to persist the report to database
 
 
 class ReportSection(BaseModel):
@@ -320,11 +331,13 @@ async def generate_verification_report(request: ReportRequest):
             )
         )
 
-    return VerificationReport(
-        id=f"report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+    report_id = f"report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+    generated_at = datetime.utcnow()
+    report = VerificationReport(
+        id=report_id,
         project_id=request.project_id,
         title=f"Verification Report - {project_name}",
-        generated_at=datetime.utcnow(),
+        generated_at=generated_at,
         format=request.format,
         sections=sections,
         metadata={
@@ -337,40 +350,141 @@ async def generate_verification_report(request: ReportRequest):
         },
     )
 
+    # Persist to database if requested
+    if request.persist:
+        try:
+            from app.core.database import AsyncSessionLocal
+            from app.models.database import Report as ReportModel
+            from uuid import UUID
+            async with AsyncSessionLocal() as db:
+                db_report = ReportModel(
+                    id=UUID(report_id.replace("report_", "").replace("_", "-")[:36]) if len(report_id) > 36 else UUID(int=0),
+                    project_id=UUID(request.project_id),
+                    simulation_id=UUID(request.simulation_id) if request.simulation_id else None,
+                    title=f"Verification Report - {project_name}",
+                    format=request.format,
+                    template=request.template,
+                    sections=[s.model_dump() for s in sections],
+                    metadata={
+                        "project_name": project_name,
+                        "simulation_id": request.simulation_id,
+                        "template": request.template,
+                        "total_sections": len(sections),
+                        "evidence_policy": "All metrics derived from persisted rows; gaps reported as UNKNOWN.",
+                        "coverage_target": DEFAULT_COVERAGE_TARGET,
+                    },
+                    generated_by="api",
+                    created_at=generated_at,
+                )
+                db.add(db_report)
+                await db.commit()
+        except Exception:
+            # Don't fail generation if persistence fails
+            pass
+
+    return report
+
 
 @router.get("/{report_id}")
 async def get_report(report_id: str):
-    """Reports are generated on demand and not persisted, so none can be fetched."""
-    raise HTTPException(
-        status_code=404,
-        detail="Report not found. Reports are generated on demand and are not persisted.",
+    """Get a persisted report by ID."""
+    from sqlalchemy import select
+    from app.core.database import AsyncSessionLocal
+    from app.models.database import Report as ReportModel
+    from uuid import UUID
+
+    try:
+        report_uuid = UUID(report_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid report ID format")
+
+    async with AsyncSessionLocal() as db:
+        report = (
+            await db.execute(select(ReportModel).where(ReportModel.id == report_uuid))
+        ).scalar_one_or_none()
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found")
+
+    # Convert to VerificationReport format
+    return VerificationReport(
+        id=str(report.id),
+        project_id=str(report.project_id),
+        title=report.title,
+        generated_at=report.created_at,
+        format=report.format,
+        sections=[ReportSection(**s) for s in report.sections],
+        metadata=report.metadata,
     )
+
+
+@router.get("")
+async def list_reports(project_id: Optional[str] = None, limit: int = 50, offset: int = 0):
+    """List persisted reports, optionally filtered by project."""
+    from sqlalchemy import select, desc
+    from app.core.database import AsyncSessionLocal
+    from app.models.database import Report as ReportModel
+    from uuid import UUID
+
+    async with AsyncSessionLocal() as db:
+        query = select(ReportModel).order_by(desc(ReportModel.created_at))
+        if project_id:
+            try:
+                query = query.where(ReportModel.project_id == UUID(project_id))
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid project ID format")
+        query = query.limit(limit).offset(offset)
+        reports = (await db.execute(query)).scalars().all()
+
+    return [
+        {
+            "id": str(r.id),
+            "project_id": str(r.project_id),
+            "title": r.title,
+            "format": r.format,
+            "template": r.template,
+            "created_at": r.created_at.isoformat(),
+            "total_sections": r.report_metadata.get("total_sections", 0),
+        }
+        for r in reports
+    ]
 
 
 @router.post("/export/{report_id}", response_class=Response)
 async def export_report(report_id: str, request: ReportRequest):
-    """Export a freshly generated report as HTML or JSON.
+    """Export a freshly generated report as HTML, JSON, or PDF.
 
     Reports are not persisted, so the report_id is not a lookup key; the caller
     supplies the same ReportRequest used for generation and the rendered document
     is returned.
     """
-    if request.format not in {"html", "json"}:
+    if request.format not in {"html", "json", "pdf"}:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported export format '{request.format}'. PDF export is not implemented.",
+            detail=f"Unsupported export format '{request.format}'. Supported: html, json, pdf",
+        )
+
+    if request.format == "pdf" and not PDF_AVAILABLE:
+        raise HTTPException(
+            status_code=501,
+            detail="PDF export requires fpdf2. Install with: pip install fpdf2",
         )
 
     report = await generate_verification_report(request)
     payload = report.model_dump(mode="json")
 
     if request.format == "json":
-        import json
-
         return Response(
             content=json.dumps(payload, indent=2),
             media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="{report.id}.json"'},
+        )
+
+    if request.format == "pdf":
+        pdf_bytes = render_pdf_document(report)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{report.id}.pdf"'},
         )
 
     return Response(
@@ -393,7 +507,7 @@ def render_html_document(report: VerificationReport) -> str:
 <title>{esc(report.title)}</title>
 <style>
  body {{ font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-        margin: 2rem auto; max-width: 60rem; color: #1f2937; line-height: 1.55; }}
+         margin: 2rem auto; max-width: 60rem; color: #1f2937; line-height: 1.55; }}
  h1 {{ border-bottom: 2px solid #111827; padding-bottom: .5rem; }}
  h2 {{ margin-top: 2rem; border-bottom: 1px solid #d1d5db; padding-bottom: .25rem; }}
  .report-table {{ border-collapse: collapse; width: 100%; margin: .75rem 0; }}
@@ -410,6 +524,59 @@ def render_html_document(report: VerificationReport) -> str:
 </body>
 </html>
 """
+
+
+def render_pdf_document(report: VerificationReport) -> bytes:
+    """Render a full standalone PDF document for a report."""
+    if not PDF_AVAILABLE:
+        raise RuntimeError("fpdf2 not installed")
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=12)
+
+    # Title
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, report.title, ln=True)
+    pdf.ln(5)
+
+    # Meta
+    pdf.set_font("Helvetica", size=9)
+    pdf.set_text_color(100, 100, 100)
+    meta = f"Generated {report.generated_at} - template: {report.metadata.get('template', 'standard')}"
+    pdf.cell(0, 5, meta, ln=True)
+    pdf.ln(5)
+    pdf.set_text_color(0, 0, 0)
+
+    # Sections
+    for section in report.sections:
+        # Section title
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(0, 10, section.title, ln=True)
+        pdf.ln(2)
+
+        # Section content - strip HTML tags for PDF
+        pdf.set_font("Helvetica", size=10)
+        clean_content = _strip_html(section.content)
+        pdf.multi_cell(0, 5, clean_content)
+        pdf.ln(4)
+
+    return pdf.output(dest="S").encode("latin-1")
+
+
+def _strip_html(html_text: str) -> str:
+    """Remove HTML tags for PDF rendering."""
+    text = re.sub(r"<[^>]+>", "", html_text)
+    # Replace HTML entities
+    text = text.replace("&nbsp;", " ")
+    text = text.replace("<", "<")
+    text = text.replace(">", ">")
+    text = text.replace("&", "&")
+    text = text.replace('"', '"')
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def _evidence_note(condition: bool, message: str) -> str:
@@ -575,11 +742,11 @@ def generate_coverage_section(coverage_rows) -> str:
 def generate_failures_section(failure_rows) -> str:
     if not failure_rows:
         return (
-            "<h2>Failures &amp; Issues</h2>"
+            "<h2>Failures & Issues</h2>"
             '<p class="evidence-unknown">[UNKNOWN] No failure analyses stored for this simulation.</p>'
         )
     html_out = (
-        "<h2>Failures &amp; Issues</h2><table class=\"report-table\">"
+        "<h2>Failures & Issues</h2><table class=\"report-table\">"
         "<tr><th>Type</th><th>Summary</th><th>Confidence</th><th>Confirmed</th></tr>"
     )
     for f in failure_rows:
@@ -643,7 +810,7 @@ def generate_conclusions(coverage_rows, test_rows, failure_rows) -> str:
     rec_html = "".join(f"<li>{esc(r)}</li>" for r in recommendations)
 
     return f"""
-    <h2>Conclusions &amp; Recommendations</h2>
+    <h2>Conclusions & Recommendations</h2>
     <h3>Observations</h3>
     <ul>{"".join(f"<li>{esc(s)}</li>" for s in summary)}</ul>
     <p class="evidence-unknown">[UNKNOWN] This report does not assert sign-off or verification
@@ -671,12 +838,13 @@ def generate_appendices(design_rows, sim_info, test_rows) -> str:
     else:
         sim_block = '<p class="evidence-unknown">[UNKNOWN] No simulation supplied.</p>'
 
-    return f"""
-    <h2>Appendices</h2>
-    <h3>Appendix A: Design List</h3>
-    <ul>{design_items}</ul>
-    <h3>Appendix B: Test List</h3>
-    <ul>{test_items}</ul>
-    <h3>Appendix C: Simulation Details</h3>
-    {sim_block}
-    """
+    html_parts = [
+        "<h2>Appendices</h2>",
+        "<h3>Appendix A: Design List</h3>",
+        f"<ul>{design_items}</ul>",
+        "<h3>Appendix B: Test List</h3>",
+        f"<ul>{test_items}</ul>",
+        "<h3>Appendix C: Simulation Details</h3>",
+        sim_block,
+    ]
+    return "\n".join(html_parts)

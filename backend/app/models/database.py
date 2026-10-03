@@ -317,3 +317,153 @@ class AuditLog(Base):
         Index("idx_audit_timestamp", "timestamp"),
         Index("idx_audit_action", "action"),
     )
+
+
+# ─── Subscription / Billing ───────────────────────────────────────────
+
+class SubscriptionTier(str, PyEnum):
+    FREE = "free"
+    STARTER = "starter"
+    PROFESSIONAL = "professional"
+    ENTERPRISE = "enterprise"
+
+
+class SubscriptionStatus(str, PyEnum):
+    ACTIVE = "active"
+    PAST_DUE = "past_due"
+    CANCELED = "canceled"
+    TRIALING = "trialing"
+    INCOMPLETE = "incomplete"
+    INCOMPLETE_EXPIRED = "incomplete_expired"
+    PAUSED = "paused"
+    UNPAID = "unpaid"
+
+
+class BillingInterval(str, PyEnum):
+    MONTHLY = "monthly"
+    YEARLY = "yearly"
+
+
+class Plan(Base):
+    __tablename__ = "plans"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(100), nullable=False, unique=True)
+    tier = Column(Enum(SubscriptionTier), nullable=False)
+    description = Column(Text, default="")
+    price_monthly = Column(Integer, default=0)  # in cents
+    price_yearly = Column(Integer, default=0)  # in cents
+    features = Column(JSONB, default=list)  # List of feature strings
+    limits = Column(JSONB, default=dict)  # {projects, simulations, storage_gb, team_members, api_calls}
+    is_active = Column(Boolean, default=True)
+    stripe_price_id_monthly = Column(String(100))
+    stripe_price_id_yearly = Column(String(100))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    subscriptions = relationship("Subscription", back_populates="plan")
+
+    __table_args__ = (
+        Index("idx_plan_tier", "tier"),
+        Index("idx_plan_active", "is_active"),
+    )
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False, unique=True)
+    plan_id = Column(UUID(as_uuid=True), ForeignKey("plans.id"), nullable=False)
+    status = Column(Enum(SubscriptionStatus), default=SubscriptionStatus.INCOMPLETE)
+    billing_interval = Column(Enum(BillingInterval), default=BillingInterval.MONTHLY)
+    current_period_start = Column(DateTime, nullable=False)
+    current_period_end = Column(DateTime, nullable=False)
+    trial_start = Column(DateTime)
+    trial_end = Column(DateTime)
+    cancel_at_period_end = Column(Boolean, default=False)
+    canceled_at = Column(DateTime)
+    stripe_customer_id = Column(String(100))
+    stripe_subscription_id = Column(String(100))
+    stripe_price_id = Column(String(100))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    project = relationship("Project", backref="subscription")
+    plan = relationship("Plan", back_populates="subscriptions")
+
+    __table_args__ = (
+        Index("idx_subscription_status", "status"),
+        Index("idx_subscription_stripe", "stripe_subscription_id"),
+    )
+
+
+class Invoice(Base):
+    __tablename__ = "invoices"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    subscription_id = Column(UUID(as_uuid=True), ForeignKey("subscriptions.id"), nullable=False)
+    stripe_invoice_id = Column(String(100), unique=True)
+    amount_due = Column(Integer, default=0)  # in cents
+    amount_paid = Column(Integer, default=0)
+    amount_remaining = Column(Integer, default=0)
+    currency = Column(String(3), default="usd")
+    status = Column(String(50))  # draft, open, paid, void, uncollectible
+    invoice_pdf = Column(String(500))
+    hosted_invoice_url = Column(String(500))
+    period_start = Column(DateTime)
+    period_end = Column(DateTime)
+    due_date = Column(DateTime)
+    paid_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_invoice_subscription", "subscription_id"),
+        Index("idx_invoice_stripe", "stripe_invoice_id"),
+        Index("idx_invoice_status", "status"),
+    )
+
+
+class PaymentMethod(Base):
+    __tablename__ = "payment_methods"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    customer_id = Column(String(100), nullable=False)  # Stripe customer ID
+    stripe_payment_method_id = Column(String(100), unique=True)
+    type = Column(String(50))  # card, bank_transfer, etc.
+    card_brand = Column(String(50))
+    card_last4 = Column(String(4))
+    card_exp_month = Column(Integer)
+    card_exp_year = Column(Integer)
+    is_default = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_payment_method_customer", "customer_id"),
+    )
+
+
+# ─── Reports ──────────────────────────────────────────────────────────
+
+class Report(Base):
+    __tablename__ = "reports"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    simulation_id = Column(UUID(as_uuid=True), ForeignKey("simulations.id"), nullable=True)
+    title = Column(String(500), nullable=False)
+    format = Column(String(20), default="html")  # html, json, pdf
+    template = Column(String(100), default="standard")
+    sections = Column(JSONB, default=list)  # [{id, title, content, order, type}]
+    report_metadata = Column("metadata", JSONB, default=dict)  # evidence_policy, coverage_target, etc.
+    generated_by = Column(String(255))  # user or system identifier
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    project = relationship("Project")
+    simulation = relationship("Simulation")
+
+    __table_args__ = (
+        Index("idx_report_project", "project_id"),
+        Index("idx_report_created", "created_at"),
+    )

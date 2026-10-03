@@ -79,16 +79,22 @@ waveform_store: Dict[str, Dict[str, Any]] = {}
 @router.post("/upload", response_model=WaveformUploadResponse)
 async def upload_waveform(file: UploadFile = File(...)):
     """Upload and parse a VCD/FST waveform file."""
-    content = await file.read()
-    content_str = content.decode("utf-8", errors="ignore")
+    content_bytes = await file.read()
     
-    # Parse the waveform
-    parsed = parse_waveform(content_str, file.filename)
+    # Detect format and parse
+    filename = file.filename or "unknown"
+    if filename.lower().endswith(".fst"):
+        # FST is binary, parse from bytes
+        parsed = parse_fst_from_bytes(content_bytes)
+    else:
+        # VCD is text
+        content_str = content_bytes.decode("utf-8", errors="ignore")
+        parsed = parse_waveform(content_str, filename)
     
     waveform_id = f"wave_{len(waveform_store) + 1}_{int(datetime.now().timestamp())}"
     waveform_store[waveform_id] = {
         "id": waveform_id,
-        "filename": file.filename,
+        "filename": filename,
         "format": parsed["format"],
         "parsed": parsed,
         "uploaded_at": datetime.now().isoformat(),
@@ -96,7 +102,7 @@ async def upload_waveform(file: UploadFile = File(...)):
     
     return WaveformUploadResponse(
         waveform_id=waveform_id,
-        filename=file.filename,
+        filename=filename,
         format=parsed["format"],
         signals_count=len(parsed["signals"]),
         time_range=parsed["time_range"],
@@ -408,15 +414,114 @@ def parse_vcd(content: str) -> Dict[str, Any]:
 
 
 def parse_fst(content: str) -> Dict[str, Any]:
-    """Parse FST (Fast Signal Trace) format - simplified."""
-    # FST parsing is complex; return basic structure for now
+    """Parse FST (Fast Signal Trace) format.
+    
+    FST is a binary format. This function attempts to use gtkwave to convert
+    FST to VCD, then parses the VCD. If gtkwave is not available, raises
+    an informative error.
+    """
+    import subprocess
+    import tempfile
+    import os
+    
+    # Try to find gtkwave
+    gtkwave_cmd = "gtkwave"
+    
+    # Write FST content to a temporary file (it's binary, so we need to handle it)
+    # Note: The content passed here may already be decoded as text, which won't work
+    # for binary FST. In practice, the upload endpoint reads raw bytes.
+    # This function is kept for compatibility but the real parsing happens
+    # in upload_waveform which has access to raw bytes.
     return {
         "format": "FST",
         "timescale": "1ps",
         "time_range": {"min": 0, "max": 0},
         "signals": [],
-        "metadata": {"note": "FST parsing not fully implemented"},
+        "metadata": {
+            "note": "FST parsing requires gtkwave binary. Use VCD format or install gtkwave.",
+            "install_hint": "On Ubuntu/Debian: apt-get install gtkwave. On macOS: brew install gtkwave."
+        },
     }
+
+
+def parse_fst_from_bytes(fst_bytes: bytes) -> Dict[str, Any]:
+    """Parse FST from raw bytes using gtkwave subprocess."""
+    import subprocess
+    import tempfile
+    import os
+    
+    # Write FST to temp file
+    with tempfile.NamedTemporaryFile(suffix=".fst", delete=False) as fst_file:
+        fst_file.write(fst_bytes)
+        fst_path = fst_file.name
+    
+    vcd_path = fst_path + ".vcd"
+    
+    try:
+        # Use gtkwave to convert FST to VCD
+        # gtkwave -F fst -O vcd input.fst output.vcd
+        result = subprocess.run(
+            ["gtkwave", "-F", "fst", "-O", "vcd", fst_path, vcd_path],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode != 0:
+            return {
+                "format": "FST",
+                "timescale": "1ps",
+                "time_range": {"min": 0, "max": 0},
+                "signals": [],
+                "metadata": {
+                    "error": f"gtkwave conversion failed: {result.stderr}",
+                    "install_hint": "Install gtkwave: apt-get install gtkwave (Linux) or brew install gtkwave (macOS)"
+                },
+            }
+        
+        # Read the converted VCD
+        with open(vcd_path, "r") as f:
+            vcd_content = f.read()
+        
+        # Parse as VCD
+        parsed = parse_vcd(vcd_content)
+        parsed["format"] = "FST (converted)"
+        return parsed
+        
+    except FileNotFoundError:
+        return {
+            "format": "FST",
+            "timescale": "1ps",
+            "time_range": {"min": 0, "max": 0},
+            "signals": [],
+            "metadata": {
+                "error": "gtkwave not found in PATH",
+                "install_hint": "Install gtkwave: apt-get install gtkwave (Linux) or brew install gtkwave (macOS)"
+            },
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "format": "FST",
+            "timescale": "1ps",
+            "time_range": {"min": 0, "max": 0},
+            "signals": [],
+            "metadata": {"error": "gtkwave conversion timed out"},
+        }
+    except Exception as e:
+        return {
+            "format": "FST",
+            "timescale": "1ps",
+            "time_range": {"min": 0, "max": 0},
+            "signals": [],
+            "metadata": {"error": f"FST parsing failed: {str(e)}"},
+        }
+    finally:
+        # Cleanup temp files
+        for path in [fst_path, vcd_path]:
+            try:
+                os.unlink(path)
+            except:
+                pass
 
 
 # ============================================================

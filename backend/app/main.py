@@ -24,6 +24,7 @@ from app.api.v1 import (
     coverage_dashboard,
     reports,
     waveform,
+    billing,
 )
 
 logging.basicConfig(
@@ -86,6 +87,7 @@ app.include_router(waveform.router, prefix=API_PREFIX, tags=["Waveform"])
 app.include_router(analysis.router, prefix=API_PREFIX, tags=["Analysis"])
 app.include_router(ai_agents.router, prefix=API_PREFIX, tags=["AI Agents"])
 app.include_router(spec_analysis.router, prefix=API_PREFIX, tags=["Specification"])
+app.include_router(billing.router, prefix=API_PREFIX, tags=["Billing"])
 
 
 # ─── WebSocket for real-time updates ──────────────────────────────────
